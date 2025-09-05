@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { APP_TITLE_BN, PUBLIC_NAV_ITEMS } from '../../constants';
+import { toBengaliNumber } from '../../lib/utils';
 
 const Footer: React.FC = () => {
   return (
@@ -38,7 +39,7 @@ const Footer: React.FC = () => {
             <ul className="mt-4 space-y-2 text-sm text-emerald-100">
               <li>৩৪১/৫ টিভি রোড, বনশ্রী, পূর্ব রামপুরা, ঢাকা-১২১৯</li>
               <li>ইমেইল: befaqulmadarisiddinia.bd@gmail.com</li>
-              <li>ফোন: 01841419005 - 01841419003</li>
+              <li>ফোন: {toBengaliNumber('01841419005')} - {toBengaliNumber('01841419003')}</li>
             </ul>
           </div>
         </div>
