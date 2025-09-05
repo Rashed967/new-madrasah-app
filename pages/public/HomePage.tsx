@@ -294,7 +294,7 @@ const HomePage: React.FC = () => {
                  <div className="h-full bg-no-repeat bg-cover bg-center rounded-lg shadow-lg p-8 text-white flex flex-col justify-end" style={{backgroundImage: 'linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.6)), url(https://res.cloudinary.com/dpes1dyqb/image/upload/v1755801567/islamic_sky_view_cuk7fu.jpg)'}}>
                     <h3 className="text-2xl font-bold mb-4">যোগাযোগের তথ্য</h3>
                     <div className="space-y-3">
-                        <p><strong>ঠিকানা:</strong> ৩৪১/৫ টিভি রোড, বনশ্রী, পূর্ব রামপুরা, ঢাকা-১২১৯</p>
+                        <p><strong>ঠিকানা:</strong> ৩৪১/৫ টিভি রোড, পূর্ব রামপুরা, ঢাকা-১২১৯</p>
                         <p><strong>ফোন (অফিস):</strong> ০১৮৪১৪১৯০০৫</p>
                         <p><strong>ফোন (পরীক্ষা):</strong> ০১৮৪১৪১৯০০৩</p>
                         <p><strong>ইমেইল:</strong> befaqulmadarisiddinia.bd@gmail.com</p>

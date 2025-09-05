@@ -36,7 +36,7 @@ const Footer: React.FC = () => {
           <div>
             <h3 className="text-sm font-semibold text-white uppercase tracking-wider">যোগাযোগ</h3>
             <ul className="mt-4 space-y-2 text-sm text-emerald-100">
-              <li>৩৪১/৫ টিভি রোড, বনশ্রী, পূর্ব রামপুরা, ঢাকা-১২১৯</li>
+              <li>৩৪১/৫ টিভি রোড, পূর্ব রামপুরা, ঢাকা-১২১৯</li>
               <li>ইমেইল: befaqulmadarisiddinia.bd@gmail.com</li>
               <li>ফোন: 01841419005 - 01841419003</li>
             </ul>

@@ -99,7 +99,7 @@ const AboutUsPage: React.FC = () => {
             <div className="flex flex-col items-center text-center p-6 bg-emerald-50 rounded-lg transition-all duration-300 hover:bg-emerald-100 hover:shadow-md">
               <MapPinIcon className="w-10 h-10 mb-3 text-emerald-600"/>
               <h4 className="text-lg font-semibold text-gray-800">অফিস</h4>
-              <p className="text-gray-700 mt-1">৩৪১/৫ টিভি রোড, বনশ্রী, পূর্ব রামপুরা, ঢাকা-১২১৯</p>
+              <p className="text-gray-700 mt-1">৩৪১/৫ টিভি রোড, পূর্ব রামপুরা, ঢাকা-১২১৯</p>
             </div>
           </div>
         </Card>
