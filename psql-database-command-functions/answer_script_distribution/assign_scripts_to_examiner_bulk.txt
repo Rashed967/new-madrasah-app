@@ -1,0 +1,110 @@
+
+-- Renamed and refactored function for bulk assignment and status update
+CREATE OR REPLACE FUNCTION public.assign_scripts_to_examiner_bulk(
+    p_assignments JSONB[] -- Array of [{examiner_id, examinee_ids, markaz_id, kitab_id, exam_id, marhala_id, distribution_date}]
+)
+RETURNS JSONB -- { total_distributions_created: INTEGER, total_scripts_assigned: INTEGER }
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_user_role TEXT;
+    v_assignment_item JSONB;
+    v_examinee_ids_array UUID[];
+    v_examinee_id_current UUID;
+    v_roll_number_current INTEGER;
+    v_distribution_id UUID;
+    v_total_distributions_created INTEGER := 0;
+    v_total_scripts_assigned INTEGER := 0;
+    v_madrasa_ids UUID[];
+
+    -- Extracted values from each assignment item
+    _examiner_id UUID;
+    _exam_id UUID;
+    _kitab_id UUID;
+    _markaz_id UUID;
+    _marhala_id UUID;
+    _distribution_date TIMESTAMPTZ;
+
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'উত্তরপত্র বন্টনের অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_assignments IS NULL OR array_length(p_assignments, 1) IS NULL THEN
+        RAISE EXCEPTION 'কোনো এসাইনমেন্ট ডেটা পাওয়া যায়নি।';
+    END IF;
+
+    FOREACH v_assignment_item IN ARRAY p_assignments
+    LOOP
+        -- Extract and validate fields for this assignment batch
+        _examiner_id       := (v_assignment_item->>'examiner_id')::UUID;
+        _exam_id           := (v_assignment_item->>'exam_id')::UUID;
+        _kitab_id          := (v_assignment_item->>'kitab_id')::UUID;
+        _markaz_id         := (v_assignment_item->>'markaz_id')::UUID;
+        _marhala_id        := (v_assignment_item->>'marhala_id')::UUID;
+        _distribution_date := (v_assignment_item->>'distribution_date')::TIMESTAMPTZ;
+        SELECT array_agg(id::uuid) INTO v_examinee_ids_array FROM jsonb_array_elements_text(v_assignment_item->'examinee_ids') AS id;
+
+        IF _examiner_id IS NULL OR _exam_id IS NULL OR _kitab_id IS NULL OR _markaz_id IS NULL OR _marhala_id IS NULL OR _distribution_date IS NULL OR array_length(v_examinee_ids_array, 1) IS NULL THEN
+            RAISE WARNING 'Skipping an assignment batch due to missing data: %', v_assignment_item;
+            CONTINUE;
+        END IF;
+        
+        -- Check if any of the examinees are already distributed for this kitab.
+        PERFORM 1 FROM public.examinees WHERE id = ANY(v_examinee_ids_array) AND status <> 'roll_assigned';
+        IF FOUND THEN
+            RAISE EXCEPTION 'এক বা একাধিক নির্বাচিত পরীক্ষার্থীর উত্তরপত্র এই পরীক্ষার জন্য ইতিমধ্যে বন্টন করা হয়েছে।'
+            USING HINT = 'তালিকাটি রিফ্রেশ করে আবার চেষ্টা করুন।';
+        END IF;
+
+        -- Derive the unique madrasa IDs from the list of examinees
+        SELECT array_agg(DISTINCT madrasa_id)
+        INTO v_madrasa_ids
+        FROM public.examinees
+        WHERE id = ANY(v_examinee_ids_array);
+
+        -- Create the main distribution record
+        INSERT INTO public.answer_script_distributions (
+            exam_id, markaz_id, marhala_id, kitab_id, examiner_teacher_id, distribution_date,
+            assigned_total_scripts_count, madrasa_ids, created_by_user_id
+        ) VALUES (
+            _exam_id, _markaz_id, _marhala_id, _kitab_id, _examiner_id, _distribution_date,
+            array_length(v_examinee_ids_array, 1), v_madrasa_ids, v_user_id
+        ) RETURNING id INTO v_distribution_id;
+
+        -- Insert details for each examinee in this batch and UPDATE THEIR STATUS
+        FOREACH v_examinee_id_current IN ARRAY v_examinee_ids_array
+        LOOP
+            SELECT roll_number INTO v_roll_number_current 
+            FROM public.examinees 
+            WHERE id = v_examinee_id_current;
+
+            INSERT INTO public.distributed_script_details (
+                distribution_id, examinee_id, exam_id, kitab_id, roll_number
+            ) VALUES (
+                v_distribution_id, v_examinee_id_current, _exam_id, _kitab_id, v_roll_number_current
+            );
+            
+            v_total_scripts_assigned := v_total_scripts_assigned + 1;
+        END LOOP;
+        
+        v_total_distributions_created := v_total_distributions_created + 1;
+    END LOOP;
+
+    RETURN jsonb_build_object(
+        'total_distributions_created', v_total_distributions_created, 
+        'total_scripts_assigned', v_total_scripts_assigned
+    );
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'এক বা একাধিক নির্বাচিত পরীক্ষার্থীর উত্তরপত্র এই পরীক্ষার জন্য ইতিমধ্যে বন্টন করা হয়েছে।'
+        USING HINT = 'তালিকাটি রিফ্রেশ করে আবার চেষ্টা করুন।';
+    WHEN others THEN
+        RAISE;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.assign_scripts_to_examiner_bulk(JSONB[]) TO authenticated;

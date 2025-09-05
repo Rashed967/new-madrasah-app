@@ -1,0 +1,80 @@
+
+CREATE OR REPLACE FUNCTION public.get_markazes_filtered(
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10,
+    p_search_term TEXT DEFAULT NULL
+    -- Future consideration: Add p_sort_field TEXT DEFAULT 'markaz_code', p_sort_order TEXT DEFAULT 'asc'
+)
+RETURNS jsonb -- Returns a JSONB object containing items and totalItems
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    _query TEXT;
+    _count_query TEXT;
+    _offset INTEGER;
+    _total_items INTEGER;
+    _items jsonb;
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    -- Base query: Select from markazes and join with madrasas for host madrasa name and zones for zone name
+    _query := 'SELECT 
+                   mk.id,
+                   mk.markaz_code,
+                   mk.name_bn,
+                   mk.host_madrasa_id,
+                   m_host.name_bn as host_madrasa_name_bn, -- Host Madrasa Name
+                   mk.zone_id,
+                   z.name_bn as zone_name_bn, -- Zone Name
+                   mk.examinee_capacity,
+                   mk.is_active,
+                   mk.created_at,
+                   mk.updated_at
+               FROM public.markazes mk
+               LEFT JOIN public.madrasas m_host ON mk.host_madrasa_id = m_host.id
+               LEFT JOIN public.zones z ON mk.zone_id = z.id
+               WHERE TRUE';
+
+    -- Search term filter
+    IF p_search_term IS NOT NULL AND p_search_term <> '' THEN
+        _query := _query || format(
+            ' AND (mk.name_bn ILIKE %1$L OR CAST(mk.markaz_code AS TEXT) ILIKE %1$L OR m_host.name_bn ILIKE %1$L OR z.name_bn ILIKE %1$L)', 
+            '%' || p_search_term || '%'
+        );
+    END IF;
+    
+    -- Get total count based on the filtered query
+    -- The count query needs to be based on the same joins and filters *before* ordering and pagination
+    _count_query := 'SELECT COUNT(mk.id) 
+                     FROM public.markazes mk
+                     LEFT JOIN public.madrasas m_host ON mk.host_madrasa_id = m_host.id
+                     LEFT JOIN public.zones z ON mk.zone_id = z.id
+                     WHERE TRUE';
+
+    IF p_search_term IS NOT NULL AND p_search_term <> '' THEN
+        _count_query := _count_query || format(
+            ' AND (mk.name_bn ILIKE %1$L OR CAST(mk.markaz_code AS TEXT) ILIKE %1$L OR m_host.name_bn ILIKE %1$L OR z.name_bn ILIKE %1$L)', 
+            '%' || p_search_term || '%'
+        );
+    END IF;
+    
+    EXECUTE _count_query INTO _total_items;
+
+    -- Add sorting (default or based on params if added later)
+    -- For now, sorting by markaz_code ascending.
+    _query := _query || ' ORDER BY mk.markaz_code ASC'; 
+
+    -- Add pagination
+    _query := _query || format(' LIMIT %L OFFSET %L', p_limit, _offset);
+    
+    -- Get items as JSON array
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _query || ') q' INTO _items;
+    
+    RETURN jsonb_build_object('items', _items, 'totalItems', _total_items);
+END;
+$$;
+
+-- Grant execute permission to the authenticated role
+GRANT EXECUTE ON FUNCTION public.get_markazes_filtered(INTEGER, INTEGER, TEXT) TO authenticated;
+    

@@ -1,0 +1,17 @@
+
+CREATE OR REPLACE FUNCTION public.get_assignments_by_madrasa_and_exam(
+    p_madrasa_id UUID,
+    p_exam_id UUID
+)
+RETURNS SETOF public.markaz_madrasa_marhala_assignments
+LANGUAGE sql
+STABLE
+SECURITY DEFINER -- Or SECURITY INVOKER if RLS policies on the table are sufficient
+AS $$
+    SELECT * 
+    FROM public.markaz_madrasa_marhala_assignments
+    WHERE madrasa_id = p_madrasa_id AND exam_id = p_exam_id
+    ORDER BY marhala_id, created_at; -- Or any other relevant order
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_assignments_by_madrasa_and_exam(UUID, UUID) TO authenticated;

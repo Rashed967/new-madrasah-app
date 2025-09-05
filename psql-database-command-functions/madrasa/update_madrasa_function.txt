@@ -1,0 +1,97 @@
+
+
+CREATE OR REPLACE FUNCTION public.update_madrasa(
+    p_madrasa_id UUID,
+    p_updates JSONB -- Contains all fields to update, including nested JSON for address, muhtamim etc.
+                    -- Example: {"name_bn": "New Name", "address": {"village": "New Village"}, "dispatch_method": "post"}
+)
+RETURNS madrasas -- Returns the updated madrasa row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_madrasa madrasas%ROWTYPE;
+    v_user_role TEXT;
+    v_current_user_id UUID;
+
+    -- Declare variables for each field to extract from JSONB
+    _name_bn TEXT; _name_ar TEXT; _name_en TEXT; _address JSONB; _zone_id UUID;
+    _mobile1 TEXT; _mobile2 TEXT; _type TEXT; _dispatch_method TEXT;
+    _highest_marhala_boys_id UUID; _highest_marhala_girls_id UUID; 
+    _muhtamim JSONB; _education_secretary JSONB; _mutawalli JSONB; 
+    _registration_date DATE; _ilhak_form_url TEXT;
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'মাদরাসা আপডেট করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Extract values from p_updates JSONB
+    _name_bn                := p_updates->>'name_bn';
+    _name_ar                := p_updates->>'name_ar';
+    _name_en                := p_updates->>'name_en';
+    _address                := p_updates->'address';
+    _zone_id                := (p_updates->>'zone_id')::UUID;
+    _mobile1                := p_updates->>'mobile1';
+    _mobile2                := p_updates->>'mobile2';
+    _type                   := p_updates->>'type';
+    _dispatch_method        := p_updates->>'dispatch_method';
+    _highest_marhala_boys_id := (p_updates->>'highest_marhala_boys_id')::UUID;
+    _highest_marhala_girls_id:= (p_updates->>'highest_marhala_girls_id')::UUID;
+    _muhtamim               := p_updates->'muhtamim';
+    _education_secretary    := p_updates->'education_secretary';
+    _mutawalli              := p_updates->'mutawalli';
+    _registration_date      := (p_updates->>'registration_date')::DATE;
+    _ilhak_form_url         := p_updates->>'ilhak_form_url';
+
+
+    -- Input Validations (similar to create_madrasa)
+    IF _name_bn IS NULL OR _name_bn = '' THEN RAISE EXCEPTION 'মাদ্রাসার বাংলা নাম আবশ্যক।'; END IF;
+    IF _name_ar IS NULL OR _name_ar = '' THEN RAISE EXCEPTION 'মাদ্রাসার আরবী নাম আবশ্যক।'; END IF;
+    -- ... (add other critical validations as in create_madrasa_function) ...
+    IF _mobile1 IS NOT NULL AND NOT (_mobile1 ~ '^(01[3-9]\d{8})$') THEN
+        RAISE EXCEPTION 'প্রথম মোবাইল নম্বরটি সঠিক নয়।';
+    END IF;
+    IF _mobile2 IS NOT NULL AND _mobile2 <> '' AND NOT (_mobile2 ~ '^(01[3-9]\d{8})$') THEN
+        RAISE EXCEPTION 'দ্বিতীয় মোবাইল নম্বরটি সঠিক নয়।';
+    END IF;
+    IF _type = 'girls' AND _highest_marhala_boys_id IS NOT NULL THEN
+        _highest_marhala_boys_id := NULL; -- Ensure consistency
+    END IF;
+    IF _type = 'boys' AND _highest_marhala_girls_id IS NOT NULL THEN
+        _highest_marhala_girls_id := NULL; -- Ensure consistency
+    END IF;
+    
+    UPDATE public.madrasas
+    SET
+        name_bn = COALESCE(_name_bn, name_bn),
+        name_ar = COALESCE(_name_ar, name_ar),
+        name_en = _name_en, -- Allow NULL
+        address = COALESCE(_address, address),
+        zone_id = COALESCE(_zone_id, zone_id),
+        mobile1 = COALESCE(_mobile1, mobile1),
+        mobile2 = _mobile2, -- Allow NULL
+        type = COALESCE(_type, type),
+        dispatch_method = COALESCE(_dispatch_method, dispatch_method),
+        highest_marhala_boys_id = _highest_marhala_boys_id, -- Allow NULL based on type logic
+        highest_marhala_girls_id = _highest_marhala_girls_id, -- Allow NULL based on type logic
+        muhtamim = COALESCE(_muhtamim, muhtamim),
+        education_secretary = _education_secretary, -- Allow NULL
+        mutawalli = _mutawalli, -- Allow NULL
+        registration_date = COALESCE(_registration_date, registration_date),
+        ilhak_form_url = _ilhak_form_url, -- Directly set, can be NULL to remove
+        updated_at = NOW()
+    WHERE id = p_madrasa_id
+    RETURNING * INTO v_updated_madrasa;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত আইডি (%) সহ কোনো মাদরাসা পাওয়া যায়নি।', p_madrasa_id;
+    END IF;
+
+    RETURN v_updated_madrasa;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_madrasa(UUID, JSONB) TO authenticated;

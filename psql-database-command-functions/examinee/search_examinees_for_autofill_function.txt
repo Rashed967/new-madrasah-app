@@ -1,0 +1,93 @@
+CREATE OR REPLACE FUNCTION public.search_examinees_for_autofill(
+    p_search_term TEXT,
+    p_limit INTEGER DEFAULT 10
+)
+RETURNS TABLE (
+    id UUID,
+    registration_number INTEGER,
+    name_bn TEXT,
+    father_name_bn TEXT,
+    exam_name TEXT,
+    name_ar TEXT,
+    name_en TEXT,
+    father_name_ar TEXT,
+    father_name_en TEXT,
+    mother_name_bn TEXT,
+    mother_name_ar TEXT,
+    mother_name_en TEXT,
+    date_of_birth DATE,
+    nid_or_birth_cert TEXT,
+    past_year_roll INTEGER,
+    past_year_marhala TEXT,
+    past_year_total_number INTEGER,
+    past_year_division TEXT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH matched_examinees AS (
+        SELECT 
+            ex.id, 
+            ex.nid_or_birth_cert, 
+            ex.exam_id as current_exam_id,
+            ex.registration_number,
+            ex.name_bn,
+            ex.father_name_bn,
+            ex.name_ar,
+            ex.name_en,
+            ex.father_name_ar,
+            ex.father_name_en,
+            ex.mother_name_bn,
+            ex.mother_name_ar,
+            ex.mother_name_en,
+            ex.date_of_birth,
+            e.name as exam_name,
+            ROW_NUMBER() OVER(PARTITION BY ex.nid_or_birth_cert ORDER BY e.created_at DESC) as rn
+        FROM public.examinees ex
+        JOIN public.exams e ON ex.exam_id = e.id
+        WHERE 
+            (p_search_term ~ '^[0-9]+$' AND ex.registration_number = p_search_term::INTEGER) OR
+            (NOT (p_search_term ~ '^[0-9]+$') AND ex.name_bn ILIKE '%' || p_search_term || '%')
+    )
+    SELECT 
+        me.id,
+        me.registration_number,
+        me.name_bn,
+        me.father_name_bn,
+        me.exam_name,
+        me.name_ar,
+        me.name_en,
+        me.father_name_ar,
+        me.father_name_en,
+        me.mother_name_bn,
+        me.mother_name_ar,
+        me.mother_name_en,
+        me.date_of_birth,
+        me.nid_or_birth_cert,
+        COALESCE(prev_ex.roll_number, -1) AS past_year_roll,
+        prev_mar.name_bn AS past_year_marhala,
+        prev_res.total_marks AS past_year_total_number,
+        prev_res.grade AS past_year_division
+    FROM matched_examinees me
+    LEFT JOIN LATERAL (
+        SELECT 
+            er.total_marks,
+            er.grade,
+            er.exam_id,
+            er.examinee_id
+        FROM public.exam_results er
+        JOIN public.examinees ex_prev ON er.examinee_id = ex_prev.id
+        WHERE ex_prev.nid_or_birth_cert = me.nid_or_birth_cert AND er.exam_id != me.current_exam_id
+        ORDER BY (SELECT created_at FROM public.exams WHERE public.exams.id = er.exam_id) DESC
+        LIMIT 1
+    ) prev_res ON true
+    LEFT JOIN public.examinees prev_ex ON prev_res.examinee_id = prev_ex.id
+    LEFT JOIN public.marhalas prev_mar ON prev_ex.marhala_id = prev_mar.id
+    WHERE me.rn = 1
+    LIMIT p_limit;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.search_examinees_for_autofill(TEXT, INTEGER) TO authenticated;

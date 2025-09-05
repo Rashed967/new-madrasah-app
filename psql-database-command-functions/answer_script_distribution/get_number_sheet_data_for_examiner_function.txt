@@ -1,0 +1,91 @@
+
+CREATE OR REPLACE FUNCTION public.get_number_sheet_data_for_examiner(
+    p_exam_id UUID,
+    p_examiner_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    result JSONB;
+BEGIN
+    IF p_exam_id IS NULL OR p_examiner_id IS NULL THEN
+        RAISE EXCEPTION 'পরীক্ষা আইডি এবং পরীক্ষক আইডি উভয়ই আবশ্যক।';
+    END IF;
+
+    -- CTE to get all distributions for the examiner, including the markaz name.
+    WITH examiner_distributions AS (
+        SELECT 
+            d.id, 
+            d.marhala_id, 
+            d.kitab_id, 
+            d.exam_id,
+            mk.name_bn as markaz_name_bn
+        FROM public.answer_script_distributions d
+        JOIN public.markazes mk ON d.markaz_id = mk.id
+        WHERE d.exam_id = p_exam_id AND d.examiner_teacher_id = p_examiner_id
+    ),
+    -- CTE to get all examinees for those distributions.
+    examinee_details AS (
+        SELECT
+            dsd.distribution_id,
+            ex.madrasa_id,
+            ex.roll_number,
+            ex.registration_number
+        FROM public.distributed_script_details dsd
+        JOIN public.examinees ex ON dsd.examinee_id = ex.id
+        WHERE dsd.distribution_id IN (SELECT id FROM examiner_distributions)
+    )
+    -- Main query to aggregate and build JSON.
+    SELECT COALESCE(jsonb_agg(marhala_kitab_group ORDER BY marhala_order, kitab_name_bn), '[]'::jsonb)
+    INTO result
+    FROM (
+        -- This level groups by marhala and kitab for each distribution.
+        SELECT
+            ed.marhala_id,
+            mar.name_bn AS marhala_name_bn,
+            mar.marhala_order,
+            ed.kitab_id,
+            kit.name_bn AS kitab_name_bn,
+            kit.full_marks,
+            -- This correlated subquery aggregates madrasas and their examinees for a specific distribution (ed.id).
+            (
+                SELECT jsonb_agg(
+                    jsonb_build_object(
+                        'madrasa_id', mad_details.madrasa_id,
+                        'madrasa_name_bn', mad_details.madrasa_name_bn,
+                        'madrasa_code', mad_details.madrasa_code,
+                        'markaz_name_bn', ed.markaz_name_bn,
+                        'examinees', mad_details.examinees
+                    ) ORDER BY mad_details.madrasa_code
+                )
+                FROM (
+                    -- This level groups examinees by madrasa.
+                    SELECT
+                        exd.madrasa_id,
+                        mad.name_bn as madrasa_name_bn,
+                        mad.madrasa_code,
+                        jsonb_agg(
+                            jsonb_build_object(
+                                'roll_number', exd.roll_number,
+                                'registration_number', exd.registration_number
+                            ) ORDER BY exd.roll_number
+                        ) AS examinees
+                    FROM examinee_details exd
+                    JOIN public.madrasas mad ON exd.madrasa_id = mad.id
+                    WHERE exd.distribution_id = ed.id -- Correlate to the specific distribution
+                    GROUP BY exd.madrasa_id, mad.name_bn, mad.madrasa_code
+                ) AS mad_details
+            ) AS madrasas
+        FROM examiner_distributions ed
+        JOIN public.marhalas mar ON ed.marhala_id = mar.id
+        JOIN public.kitabs kit ON ed.kitab_id = kit.id
+    ) AS marhala_kitab_group;
+
+    RETURN result;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_number_sheet_data_for_examiner(UUID, UUID) TO authenticated;

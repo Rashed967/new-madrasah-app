@@ -1,0 +1,16 @@
+
+CREATE OR REPLACE FUNCTION public.get_assigned_personnel_ids_for_exam_by_role(
+    p_exam_id UUID,
+    p_assigned_role TEXT -- 'negran' or 'mumtahin'
+)
+RETURNS UUID[]
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(array_agg(DISTINCT personnel_id), '{}'::UUID[])
+    FROM public.exam_personnel_assignments
+    WHERE exam_id = p_exam_id AND assigned_role = p_assigned_role;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_assigned_personnel_ids_for_exam_by_role(UUID, TEXT) TO authenticated;

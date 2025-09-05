@@ -1,0 +1,46 @@
+
+CREATE OR REPLACE FUNCTION public.delete_zone(p_id UUID)
+RETURNS VOID -- Returns nothing on success, raises exception on failure
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    referencing_madrasa_count INTEGER;
+    v_zone_name_bn TEXT;
+BEGIN
+    IF p_id IS NULL THEN
+        RAISE EXCEPTION 'জোন আইডি আবশ্যক (Zone ID is required)';
+    END IF;
+
+    SELECT name_bn INTO v_zone_name_bn FROM public.zones WHERE id = p_id;
+
+    IF NOT FOUND THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো জোন পাওয়া যায়নি, তাই কিছুই মোছা হয়নি।', p_id;
+        RETURN;
+    END IF;
+
+    -- Check if the zone_id is referenced in any madrasas table
+    -- Ensure your madrasas table is named 'public.madrasas' and has a 'zone_id' column.
+    -- Cast p_id to TEXT for comparison if madrasas.zone_id is TEXT.
+    SELECT COUNT(*)
+    INTO referencing_madrasa_count
+    FROM public.madrasas m 
+    WHERE m.zone_id = p_id::TEXT; -- Cast p_id to TEXT
+
+    IF referencing_madrasa_count > 0 THEN
+        RAISE EXCEPTION 'এই জোনটি ("%") % টি মাদরাসা দ্বারা ব্যবহৃত হয়েছে। প্রথমে মাদরাসা থেকে এই জোনটি সরিয়ে ফেলুন অথবা মাদরাসাগুলো মুছুন।', 
+            v_zone_name_bn, 
+            referencing_madrasa_count
+        USING ERRCODE = '23503', -- foreign_key_violation (or a custom code)
+              DETAIL = 'Zone is referenced by ' || referencing_madrasa_count || ' madrasa(s).',
+              HINT = 'Remove or reassign madrasas from this zone before deleting it.';
+    END IF;
+
+    -- Delete the zone
+    DELETE FROM public.zones
+    WHERE id = p_id;
+    
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.delete_zone(UUID) TO authenticated;

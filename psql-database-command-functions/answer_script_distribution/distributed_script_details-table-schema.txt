@@ -1,0 +1,29 @@
+
+CREATE TABLE IF NOT EXISTS public.distributed_script_details (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    distribution_id UUID NOT NULL REFERENCES public.answer_script_distributions(id) ON DELETE CASCADE,
+    examinee_id UUID NOT NULL REFERENCES public.examinees(id) ON DELETE RESTRICT,
+    exam_id UUID NOT NULL REFERENCES public.exams(id) ON DELETE RESTRICT, 
+    kitab_id UUID NOT NULL REFERENCES public.kitabs(id) ON DELETE RESTRICT, 
+    roll_number INTEGER, -- Denormalized for convenience in reports/slips
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    
+    -- Ensure that an examinee's script for a specific exam and kitab can only be part of ONE distribution
+    CONSTRAINT unique_examinee_script_assignment UNIQUE (exam_id, kitab_id, examinee_id) 
+);
+
+COMMENT ON TABLE public.distributed_script_details IS 'Details which specific examinee scripts are part of an answer_script_distributions batch.';
+COMMENT ON COLUMN public.distributed_script_details.roll_number IS 'Denormalized roll number of the examinee at the time of distribution for quick reference on slips/reports.';
+
+CREATE INDEX IF NOT EXISTS idx_dsd_distribution_id ON public.distributed_script_details(distribution_id);
+CREATE INDEX IF NOT EXISTS idx_dsd_examinee_id ON public.distributed_script_details(examinee_id);
+CREATE INDEX IF NOT EXISTS idx_dsd_exam_kitab_examinee ON public.distributed_script_details(exam_id, kitab_id, examinee_id);
+
+ALTER TABLE public.distributed_script_details ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow admin full access to distributed_script_details"
+ON public.distributed_script_details
+FOR ALL
+TO authenticated
+USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

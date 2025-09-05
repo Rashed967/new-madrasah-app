@@ -1,0 +1,25 @@
+CREATE OR REPLACE FUNCTION public.get_latest_examinee_by_reg_no(
+    p_registration_number INTEGER
+)
+RETURNS SETOF examinees -- Returns a single row from the examinees table
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    -- Input validation
+    IF p_registration_number IS NULL THEN
+        RAISE EXCEPTION 'Registration number is required';
+    END IF;
+
+    -- Find the most recent examinee with the given registration number
+    RETURN QUERY
+    SELECT *
+    FROM public.examinees
+    WHERE registration_number = p_registration_number
+    ORDER BY created_at DESC
+    LIMIT 1;
+END;
+$$;
+
+-- Grant execute permission to authenticated users
+GRANT EXECUTE ON FUNCTION public.get_latest_examinee_by_reg_no(INTEGER) TO authenticated;

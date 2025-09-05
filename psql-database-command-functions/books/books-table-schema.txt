@@ -1,0 +1,31 @@
+
+CREATE TABLE IF NOT EXISTS public.books (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL UNIQUE,
+    author TEXT,
+    price NUMERIC(10, 2) NOT NULL CHECK (price >= 0),
+    initial_stock INTEGER NOT NULL DEFAULT 0 CHECK (initial_stock >= 0),
+    current_stock INTEGER NOT NULL DEFAULT 0 CHECK (current_stock >= 0),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+COMMENT ON TABLE public.books IS 'Stores information about books available for sale.';
+COMMENT ON COLUMN public.books.initial_stock IS 'The initial number of books when first added.';
+COMMENT ON COLUMN public.books.current_stock IS 'The current number of books available in stock.';
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_books_updated ON public.books;
+CREATE TRIGGER on_books_updated
+BEFORE UPDATE ON public.books
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies
+ALTER TABLE public.books ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow admin full access for books"
+  ON public.books
+  FOR ALL TO authenticated
+  USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+  WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

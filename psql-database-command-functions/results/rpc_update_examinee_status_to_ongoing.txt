@@ -1,0 +1,31 @@
+-- This function updates the status of all examinees for a given exam to 'ongoing'.
+
+CREATE OR REPLACE FUNCTION public.update_examinee_status_to_ongoing(p_exam_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+BEGIN
+    -- Authorization check
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'Examinee status update failed: Insufficient privileges.' USING ERRCODE = '42501';
+    END IF;
+
+    -- Update the status of all examinees for the given exam to 'ongoing'
+    UPDATE public.examinees
+    SET status = 'ongoing'
+    WHERE exam_id = p_exam_id;
+
+    RETURN jsonb_build_object('success', true, 'message', 'Examinee status updated to ongoing.');
+EXCEPTION
+    WHEN others THEN
+        RAISE WARNING 'Error in update_examinee_status_to_ongoing: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RETURN jsonb_build_object('success', false, 'message', 'An unexpected error occurred: ' || SQLERRM);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_examinee_status_to_ongoing(UUID) TO authenticated;

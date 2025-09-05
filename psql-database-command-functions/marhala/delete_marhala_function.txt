@@ -1,0 +1,40 @@
+CREATE OR REPLACE FUNCTION public.delete_marhala(p_id UUID)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_deleted_marhala_type TEXT; -- Store the type of the marhala being deleted
+    rec RECORD;
+    v_current_order INTEGER;
+BEGIN
+    IF p_id IS NULL THEN
+        RAISE EXCEPTION 'মারহালা আইডি আবশ্যক।';
+    END IF;
+
+    -- Get the type of the marhala being deleted
+    SELECT type INTO v_deleted_marhala_type FROM public.marhalas WHERE id = p_id;
+
+    IF NOT FOUND THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো মারহালা পাওয়া যায়নি, তাই কিছুই মোছা হয়নি।', p_id;
+        RETURN;
+    END IF;
+
+    -- Delete the marhala
+    DELETE FROM public.marhalas WHERE id = p_id;
+
+    -- Re-order subsequent marhalas only for the same type
+    IF v_deleted_marhala_type IS NOT NULL THEN
+        v_current_order := 1;
+        FOR rec IN
+            SELECT id FROM public.marhalas 
+            WHERE type = v_deleted_marhala_type -- Only re-order within the same type
+            ORDER BY marhala_order ASC NULLS LAST, created_at ASC
+        LOOP
+            UPDATE public.marhalas SET marhala_order = v_current_order WHERE id = rec.id;
+            v_current_order := v_current_order + 1;
+        END LOOP;
+    END IF;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.delete_marhala(UUID) TO authenticated;

@@ -1,0 +1,104 @@
+-- Ensure the handle_updated_at function exists
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at() ... (if not already created)
+
+CREATE TABLE IF NOT EXISTS public.teacher_exam_applications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    teacher_id UUID NOT NULL REFERENCES public.teachers(id) ON DELETE CASCADE,
+    exam_id UUID NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+    
+    applying_from_madrasa_id UUID REFERENCES public.madrasas(id) ON DELETE SET NULL, -- Optional
+    
+    preferred_marhala_category TEXT NOT NULL CHECK (preferred_marhala_category IN ('darsiyat', 'hifz')),
+    kitabi_teaching_details TEXT, -- "কোন কোন কিতাব পড়িয়েছেন বা পড়াচ্ছেন"
+    teaching_experience_years INTEGER NOT NULL CHECK (teaching_experience_years >= 0),
+    
+    application_role_preference TEXT NOT NULL CHECK (application_role_preference IN ('negran', 'mumtahin', 'both')),
+    preferred_role_type TEXT NOT NULL CHECK (preferred_role_type IN ('head', 'assistant')),
+    
+    preferred_kitabs_for_evaluation TEXT[], -- For mumtahin/both, array of Kitab Names (not IDs)
+    
+    has_previous_experience BOOLEAN DEFAULT FALSE NOT NULL,
+    previous_experience_role_type TEXT CHECK (previous_experience_role_type IN ('head', 'assistant')), -- Nullable if no prev_exp
+    previous_experience_kitab_names TEXT[], -- For mumtahin experience, array of Kitab Names
+    
+    application_status TEXT DEFAULT 'pending' NOT NULL CHECK (application_status IN ('pending', 'approved', 'rejected', 'shortlisted')),
+    application_date TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    
+    notes_by_applicant TEXT,
+    reviewed_by UUID REFERENCES auth.users(id) ON DELETE SET NULL, -- Admin user_id who reviewed
+    review_notes TEXT,            -- Admin's notes on the application
+    
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+
+    CONSTRAINT unique_teacher_application_for_exam UNIQUE (teacher_id, exam_id),
+    CONSTRAINT check_previous_experience_role CHECK (
+        (has_previous_experience = FALSE AND previous_experience_role_type IS NULL) OR
+        (has_previous_experience = TRUE AND previous_experience_role_type IS NOT NULL)
+    )
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_tea_teacher_id ON public.teacher_exam_applications(teacher_id);
+CREATE INDEX IF NOT EXISTS idx_tea_exam_id ON public.teacher_exam_applications(exam_id);
+CREATE INDEX IF NOT EXISTS idx_tea_applying_from_madrasa_id ON public.teacher_exam_applications(applying_from_madrasa_id);
+CREATE INDEX IF NOT EXISTS idx_tea_application_status ON public.teacher_exam_applications(application_status);
+CREATE INDEX IF NOT EXISTS idx_tea_application_role_preference ON public.teacher_exam_applications(application_role_preference);
+CREATE INDEX IF NOT EXISTS idx_tea_preferred_marhala_category ON public.teacher_exam_applications(preferred_marhala_category);
+
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_teacher_exam_applications_updated ON public.teacher_exam_applications;
+CREATE TRIGGER on_teacher_exam_applications_updated
+BEFORE UPDATE ON public.teacher_exam_applications
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies
+ALTER TABLE public.teacher_exam_applications ENABLE ROW LEVEL SECURITY;
+
+-- Teachers can insert their own applications
+CREATE POLICY "Teachers can insert their own exam applications"
+  ON public.teacher_exam_applications
+  FOR INSERT TO authenticated
+  WITH CHECK (EXISTS (
+    SELECT 1 FROM public.teacher_user_mapping tum 
+    WHERE tum.user_id = auth.uid() AND tum.teacher_id = teacher_id -- Refers to the teacher_id of the row being inserted
+  ));
+  -- Note: The RPC function 'create_teacher_exam_application' should also enforce that
+  -- the teacher_id being inserted matches the one mapped to auth.uid().
+
+-- Teachers can view their own applications
+CREATE POLICY "Teachers can view their own exam applications"
+  ON public.teacher_exam_applications
+  FOR SELECT TO authenticated
+  USING (EXISTS (
+    SELECT 1 FROM public.teacher_user_mapping tum 
+    WHERE tum.user_id = auth.uid() AND tum.teacher_id = public.teacher_exam_applications.teacher_id -- Refers to existing row's teacher_id
+  ));
+
+-- Teachers can update their own PENDING applications (specific fields, controlled by RPC)
+CREATE POLICY "Teachers can update their own PENDING exam applications"
+  ON public.teacher_exam_applications
+  FOR UPDATE TO authenticated
+  USING ( -- For checking the existing row before update
+    application_status = 'pending' AND 
+    EXISTS (
+      SELECT 1 FROM public.teacher_user_mapping tum 
+      WHERE tum.user_id = auth.uid() AND tum.teacher_id = public.teacher_exam_applications.teacher_id -- Refers to existing row's teacher_id
+    )
+  )
+  WITH CHECK ( -- For checking the row after update (new values)
+    application_status = 'pending' AND
+     EXISTS (
+      SELECT 1 FROM public.teacher_user_mapping tum 
+      WHERE tum.user_id = auth.uid() AND tum.teacher_id = teacher_id -- Refers to the new/updated row's teacher_id
+    )
+  );
+
+-- Admins have full access
+CREATE POLICY "Admin full access for teacher_exam_applications"
+  ON public.teacher_exam_applications
+  FOR ALL TO authenticated
+  USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+  WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

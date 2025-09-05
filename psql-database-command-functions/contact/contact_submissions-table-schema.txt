@@ -1,0 +1,33 @@
+
+-- This table will store submissions from the public contact form.
+CREATE TABLE IF NOT EXISTS public.contact_submissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    subject TEXT,
+    message TEXT NOT NULL,
+    status TEXT DEFAULT 'new' NOT NULL CHECK (status IN ('new', 'read', 'replied', 'archived')),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+COMMENT ON TABLE public.contact_submissions IS 'Stores messages submitted through the public contact form.';
+COMMENT ON COLUMN public.contact_submissions.status IS 'Tracks the status of the submitted message.';
+
+-- Enable Row Level Security (RLS)
+ALTER TABLE public.contact_submissions ENABLE ROW LEVEL SECURITY;
+
+-- Policy: Allow anyone (anonymous users included) to insert a new message.
+-- This is crucial for a public-facing contact form.
+CREATE POLICY "Allow public insert for contact form submissions"
+ON public.contact_submissions
+FOR INSERT
+TO anon, authenticated
+WITH CHECK (true);
+
+-- Policy: Restrict read, update, and delete access to admins only.
+-- This prevents any user, anonymous or logged in, from seeing others' messages.
+CREATE POLICY "Allow admin full access to contact submissions"
+ON public.contact_submissions
+FOR ALL
+USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

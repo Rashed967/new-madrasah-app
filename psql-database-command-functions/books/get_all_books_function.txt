@@ -1,0 +1,13 @@
+
+CREATE OR REPLACE FUNCTION public.get_all_books()
+RETURNS SETOF books
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT *
+    FROM public.books
+    ORDER BY title ASC;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_all_books() TO authenticated;

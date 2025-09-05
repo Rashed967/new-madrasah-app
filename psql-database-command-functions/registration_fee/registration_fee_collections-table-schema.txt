@@ -1,0 +1,43 @@
+
+-- Ensure the handle_updated_at function exists
+
+CREATE TABLE IF NOT EXISTS public.registration_fee_collections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    receipt_no SERIAL UNIQUE NOT NULL, -- Added for sequential receipt numbers
+    exam_id UUID NOT NULL REFERENCES public.exams(id) ON DELETE RESTRICT,
+    madrasa_id UUID NOT NULL REFERENCES public.madrasas(id) ON DELETE RESTRICT,
+    apply_late_fee BOOLEAN DEFAULT FALSE NOT NULL,
+    collection_date TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    total_calculated_fee NUMERIC(10, 2) NOT NULL CHECK (total_calculated_fee >= 0),
+    total_paid_amount NUMERIC(10, 2) NOT NULL CHECK (total_paid_amount >= 0),
+    balance_amount NUMERIC(10, 2) NOT NULL, -- Can be negative if overpaid, though UI should prevent
+    created_by UUID REFERENCES auth.users(id), -- Optional: to track who created the record
+    updated_by UUID REFERENCES auth.users(id), -- Optional: to track who last updated
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+    -- Removed: CONSTRAINT unique_exam_madrasa_fee_collection UNIQUE (exam_id, madrasa_id)
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_rfc_exam_id ON public.registration_fee_collections(exam_id);
+CREATE INDEX IF NOT EXISTS idx_rfc_madrasa_id ON public.registration_fee_collections(madrasa_id);
+CREATE INDEX IF NOT EXISTS idx_rfc_receipt_no ON public.registration_fee_collections(receipt_no); -- Index on the new column
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_registration_fee_collections_updated ON public.registration_fee_collections;
+CREATE TRIGGER on_registration_fee_collections_updated
+BEFORE UPDATE ON public.registration_fee_collections
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies (Adjust as needed)
+-- ALTER TABLE public.registration_fee_collections ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow admin full access for reg_fee_collections" 
+--   ON public.registration_fee_collections
+--   FOR ALL TO authenticated
+--   USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+--   WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+-- CREATE POLICY "Allow madrasa users to view their own collections"
+--   ON public.registration_fee_collections
+--   FOR SELECT TO authenticated
+--   USING (madrasa_id = (SELECT madrasa_id FROM public.user_profiles WHERE id = auth.uid())); -- Example, adjust if madrasa_id is not on user_profiles

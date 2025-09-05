@@ -1,0 +1,45 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "useDefineForClassFields": true,
+    "lib": ["DOM", "DOM.Iterable", "ESNext"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"] 
+    }
+  },
+  "include": [
+    "./index.tsx",
+    "./App.tsx",
+    "./constants.ts",
+    "./types.ts",
+    "./components/**/*.ts",
+    "./components/**/*.tsx",
+    "./pages/**/*.ts",
+    "./pages/**/*.tsx",
+    "./contexts/**/*.ts",
+    "./contexts/**/*.tsx",
+    "./assets/**/*.ts",
+    "./assets/**/*.tsx",
+    "./data/**/*.ts",
+    "./data/**/*.tsx",
+    "./lib/**/*.ts",
+    "./lib/**/*.tsx",
+    "./src/**/*.ts",
+    "./src/**/*.tsx"
+  ],
+  "exclude": ["node_modules", "dist", "express-backend"]
+}

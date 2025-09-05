@@ -1,0 +1,54 @@
+
+-- ===================================================================
+-- RPC Function: get_exam_personnel_assignments (Updated)
+-- Purpose: Fetch assignments for a given exam and markaz, including negran_type and better personnel details.
+-- ===================================================================
+CREATE OR REPLACE FUNCTION public.get_exam_personnel_assignments(
+    p_exam_id UUID,
+    p_markaz_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    _items_jsonb JSONB;
+    _total_items INTEGER;
+    _query TEXT;
+BEGIN
+    IF p_exam_id IS NULL OR p_markaz_id IS NULL THEN
+        RAISE EXCEPTION 'পরীক্ষা আইডি এবং মারকায আইডি উভয়ই আবশ্যক।';
+    END IF;
+
+    _query := format(
+        $QUERY$
+        SELECT
+            epa.id AS assignment_id,
+            epa.assigned_role,
+            epa.assigned_marhala_id,
+            epa.negran_type, 
+            epa.created_at AS assignment_created_at,
+            t.id AS personnel_id,
+            t.teacher_code AS personnel_code,
+            t.name_bn AS personnel_name_bn,
+            t.mobile AS personnel_mobile,
+            (SELECT m_edu.name_bn FROM public.marhalas m_edu WHERE m_edu.id = t.educational_qualification) AS educational_qualification, 
+            (SELECT array_agg(k.name_bn) FROM public.kitabs k WHERE k.id = ANY(t.kitabi_qualification)) AS kitabi_qualification, 
+            mar.name_bn AS assigned_marhala_name_bn,
+            mar.type AS assigned_marhala_type
+        FROM public.exam_personnel_assignments epa
+        JOIN public.teachers t ON epa.personnel_id = t.id
+        LEFT JOIN public.marhalas mar ON epa.assigned_marhala_id = mar.id
+        WHERE epa.exam_id = %L AND epa.markaz_id = %L
+        ORDER BY t.name_bn, epa.assigned_role
+        $QUERY$,
+        p_exam_id, p_markaz_id
+    ); 
+
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _query || ') q' INTO _items_jsonb;
+    _total_items := COALESCE(jsonb_array_length(_items_jsonb), 0); -- Corrected line
+
+    RETURN jsonb_build_object('assignments', _items_jsonb, 'totalItems', _total_items);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_exam_personnel_assignments(UUID, UUID) TO authenticated;

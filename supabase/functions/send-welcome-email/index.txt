@@ -1,0 +1,101 @@
+import type {} from "https://esm.sh/@supabase/functions-js@2/src/edge-runtime.d.ts";
+
+// supabase/functions/approve-madrasa-application/index.ts
+// IMPORTANT: This function is repurposed from 'send-welcome-email'. Its new role is to handle the entire approval flow securely.
+// Ensure the function name in Supabase is updated or you invoke 'send-welcome-email'.
+
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+// CORS headers for preflight requests and actual requests
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*', // Adjust for production
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+serve(async (req) => {
+  // Handle CORS preflight request
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
+  try {
+    // 1. Get the application ID from the request body
+    const { applicationId } = await req.json();
+    if (!applicationId) {
+      throw new Error("Application ID is required.");
+    }
+
+    // 2. Create a Supabase admin client to perform privileged actions
+    const supabaseAdmin = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+      {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      }
+    );
+
+    // 3. Fetch the application details from the database
+    const { data: application, error: fetchError } = await supabaseAdmin
+      .from("madrasa_applications")
+      .select("*")
+      .eq("id", applicationId)
+      .single();
+
+    if (fetchError || !application) {
+      throw new Error(`Application not found or could not be fetched: ${fetchError?.message || 'Not Found'}`);
+    }
+
+    if (application.application_status !== 'pending') {
+      throw new Error(`Application is already ${application.application_status}.`);
+    }
+
+    // 4. Invite the user using the admin client. This creates the auth.users entry.
+    const { data: inviteData, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(
+      application.contact_email,
+      { data: { full_name: application.muhtamim.name } }
+    );
+
+    if (inviteError) {
+      // Handle case where user already exists, which is not necessarily a failure
+      if (inviteError.message.includes("User already registered")) {
+         throw new Error(`A user with the email '${application.contact_email}' is already registered. Cannot create a new madrasa account for this email.`);
+      }
+      throw inviteError;
+    }
+
+    if (!inviteData || !inviteData.user) {
+      throw new Error("Failed to invite user or retrieve user data.");
+    }
+
+    // 5. Call the RPC function to finalize the process
+    // This function will create the madrasa, user_profile, and update the application status.
+    const { error: rpcError } = await supabaseAdmin.rpc("approve_madrasa_application", {
+      p_application_id: applicationId,
+      p_new_user_id: inviteData.user.id,
+      p_user_email: application.contact_email,
+    });
+
+    if (rpcError) {
+      // Optional: Clean up the created user if the RPC fails
+      await supabaseAdmin.auth.admin.deleteUser(inviteData.user.id);
+      throw new Error(`Failed to finalize application approval after user creation: ${rpcError.message}`);
+    }
+    
+    // 6. Return a success response
+    return new Response(JSON.stringify({ message: "Application approved successfully. User has been invited." }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 200,
+    });
+
+  } catch (error) {
+    console.error("Error in approve-madrasa-application function:", error.message);
+    return new Response(JSON.stringify({ error: error.message }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 400, // Using 400 for client-side or data errors
+    });
+  }
+});

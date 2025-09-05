@@ -1,0 +1,42 @@
+
+-- Ensure the handle_updated_at function exists
+
+CREATE TABLE IF NOT EXISTS public.bank_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL REFERENCES public.bank_accounts(id) ON DELETE RESTRICT,
+    type TEXT NOT NULL CHECK (type IN ('deposit', 'withdrawal', 'transfer')),
+    amount NUMERIC(15, 2) NOT NULL CHECK (amount > 0),
+    transaction_date DATE NOT NULL,
+    description TEXT,
+    check_number TEXT,
+    related_transaction_id UUID REFERENCES public.bank_transactions(id) ON DELETE SET NULL, -- Self-reference for transfers
+    balance_after NUMERIC(15, 2) NOT NULL,
+    created_by UUID REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+COMMENT ON TABLE public.bank_transactions IS 'Logs every banking transaction: deposit, withdrawal, and transfer.';
+COMMENT ON COLUMN public.bank_transactions.related_transaction_id IS 'For transfers, links the withdrawal transaction to the deposit transaction.';
+COMMENT ON COLUMN public.bank_transactions.balance_after IS 'The balance of the account_id account *after* this transaction was completed.';
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_bank_transactions_account_id ON public.bank_transactions(account_id);
+CREATE INDEX IF NOT EXISTS idx_bank_transactions_type ON public.bank_transactions(type);
+CREATE INDEX IF NOT EXISTS idx_bank_transactions_transaction_date ON public.bank_transactions(transaction_date);
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_bank_transactions_updated ON public.bank_transactions;
+CREATE TRIGGER on_bank_transactions_updated
+BEFORE UPDATE ON public.bank_transactions
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies
+ALTER TABLE public.bank_transactions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow admin full access for bank_transactions"
+  ON public.bank_transactions
+  FOR ALL TO authenticated
+  USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+  WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

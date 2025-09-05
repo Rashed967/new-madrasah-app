@@ -1,0 +1,30 @@
+
+CREATE TABLE IF NOT EXISTS public.certificate_applications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    examinee_id UUID NOT NULL REFERENCES public.examinees(id),
+    exam_id UUID NOT NULL REFERENCES public.exams(id),
+    applied_certificates JSONB NOT NULL,
+    total_fee NUMERIC(10, 2) NOT NULL,
+    contact_mobile TEXT NOT NULL,
+    payment_status TEXT NOT NULL DEFAULT 'pending' CHECK (payment_status IN ('pending', 'paid', 'failed')),
+    payment_details JSONB,
+    application_status TEXT NOT NULL DEFAULT 'pending' CHECK (application_status IN ('pending', 'processing', 'ready_for_delivery', 'completed', 'rejected')),
+    notes_by_admin TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_certificate_applications_updated ON public.certificate_applications;
+CREATE TRIGGER on_certificate_applications_updated
+BEFORE UPDATE ON public.certificate_applications
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS
+ALTER TABLE public.certificate_applications ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow public read access for own application status"
+ON public.certificate_applications FOR SELECT USING (true); -- Public status check is fine
+CREATE POLICY "Allow admin full access for certificate applications"
+ON public.certificate_applications FOR ALL TO authenticated
+USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

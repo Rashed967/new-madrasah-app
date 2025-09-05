@@ -1,0 +1,25 @@
+
+CREATE OR REPLACE FUNCTION public.delete_madrasa_inspection(
+    p_inspection_id UUID
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = auth.uid();
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'পরিদর্শন রিপোর্ট মুছে ফেলার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    DELETE FROM public.madrasa_inspections
+    WHERE id = p_inspection_id;
+
+    IF NOT FOUND THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো পরিদর্শন রিপোর্ট পাওয়া যায়নি।', p_inspection_id;
+    END IF;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.delete_madrasa_inspection(UUID) TO authenticated;

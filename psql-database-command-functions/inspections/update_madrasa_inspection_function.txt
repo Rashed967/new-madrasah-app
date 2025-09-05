@@ -1,0 +1,37 @@
+CREATE OR REPLACE FUNCTION public.update_madrasa_inspection(
+    p_inspection_id UUID,
+    p_updates JSONB
+)
+RETURNS madrasa_inspections
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_inspection madrasa_inspections%ROWTYPE;
+    v_user_role TEXT;
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = auth.uid();
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'পরিদর্শন রিপোর্ট আপডেট করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    UPDATE public.madrasa_inspections
+    SET
+        madrasa_id = COALESCE((p_updates->>'madrasa_id')::UUID, madrasa_id),
+        exam_id = COALESCE((p_updates->>'exam_id')::UUID, exam_id),
+        inspection_date = COALESCE((p_updates->>'inspection_date')::DATE, inspection_date),
+        inspector_name = COALESCE(p_updates->>'inspector_name', inspector_name),
+        comments = COALESCE(p_updates->>'comments', comments),
+        fees = COalesce(p_updates->'fees', fees)
+        -- total_fee is generated and updated_at is handled by trigger
+    WHERE id = p_inspection_id
+    RETURNING * INTO v_updated_inspection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত আইডি (%) সহ কোনো পরিদর্শন রিপোর্ট পাওয়া যায়নি।', p_inspection_id;
+    END IF;
+
+    RETURN v_updated_inspection;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.update_madrasa_inspection(UUID, JSONB) TO authenticated;

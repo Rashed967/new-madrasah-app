@@ -1,0 +1,95 @@
+-- This file is for schema REFERENCE or for setting up a brand new database.
+-- If you have an existing 'examinees' table, use the 'alter-examinees-add-script-distributed-status.txt' script instead.
+
+-- Ensure the handle_updated_at function exists
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at() ... (if not already created)
+
+CREATE TABLE IF NOT EXISTS public.examinees (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    registration_fee_collection_id UUID NOT NULL REFERENCES public.registration_fee_collections(id) ON DELETE RESTRICT, -- Links to the specific fee collection instance
+    exam_id UUID NOT NULL REFERENCES public.exams(id) ON DELETE RESTRICT,
+    madrasa_id UUID NOT NULL REFERENCES public.madrasas(id) ON DELETE RESTRICT,
+    marhala_id UUID NOT NULL REFERENCES public.marhalas(id) ON DELETE RESTRICT,
+    
+    registration_number INTEGER NOT NULL,
+    student_type TEXT NOT NULL CHECK (student_type IN ('regular', 'irregular')),
+    
+    name_bn TEXT NOT NULL,
+    name_ar TEXT,
+    name_en TEXT,
+    
+    father_name_bn TEXT NOT NULL,
+    father_name_ar TEXT,
+    father_name_en TEXT,
+    
+    mother_name_bn TEXT NOT NULL,
+    mother_name_ar TEXT,
+    mother_name_en TEXT,
+    
+    date_of_birth DATE NOT NULL,
+    nid_or_birth_cert TEXT NOT NULL, -- Can be NID or Birth Certificate number
+    
+    photo_url TEXT, -- URL for examinee's photo (NEWLY ADDED)
+
+    status TEXT DEFAULT 'fee_pending' NOT NULL CHECK (status IN (
+        'fee_pending', 
+        'fee_paid',
+        'roll_assigned', 
+        'ongoing',
+        'correction_requested',
+        'absent',
+        'expelled'
+    )),
+    roll_number INTEGER, -- To be assigned later
+    
+    registration_input_date TIMESTAMPTZ DEFAULT NOW() NOT NULL, -- When this record was created
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+
+    past_year_roll INTEGER,
+    past_year_marhala TEXT,
+    past_exam_year INTEGER,
+    past_year_total_number INTEGER,
+    past_year_division TEXT,
+    past_year_comment TEXT,
+
+    -- Constraints
+    -- Ensure registration_number is unique within a specific exam
+    CONSTRAINT unique_exam_registration_number UNIQUE (exam_id, registration_number),
+    -- Ensure roll_number is unique within a specific exam (if assigned)
+    CONSTRAINT unique_exam_roll_number UNIQUE (exam_id, roll_number) DEFERRABLE INITIALLY DEFERRED
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_examinees_exam_id ON public.examinees(exam_id);
+CREATE INDEX IF NOT EXISTS idx_examinees_madrasa_id ON public.examinees(madrasa_id);
+CREATE INDEX IF NOT EXISTS idx_examinees_marhala_id ON public.examinees(marhala_id);
+CREATE INDEX IF NOT EXISTS idx_examinees_registration_number ON public.examinees(registration_number);
+CREATE INDEX IF NOT EXISTS idx_examinees_roll_number ON public.examinees(roll_number);
+CREATE INDEX IF NOT EXISTS idx_examinees_status ON public.examinees(status);
+CREATE INDEX IF NOT EXISTS idx_examinees_reg_fee_collection_id ON public.examinees(registration_fee_collection_id);
+
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_examinees_updated ON public.examinees;
+CREATE TRIGGER on_examinees_updated
+BEFORE UPDATE ON public.examinees
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies (Example)
+-- ALTER TABLE public.examinees ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow admin full access for examinees" 
+--   ON public.examinees 
+--   FOR ALL TO authenticated 
+--   USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+--   WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+-- CREATE POLICY "Allow madrasa users to manage their examinees"
+--   ON public.examinees
+--   FOR ALL TO authenticated
+--   USING (madrasa_id = (SELECT madrasa_id FROM public.user_profiles WHERE id = auth.uid())); 
+  -- This example assumes user_profiles has a madrasa_id. Adjust based on your user-madrasa mapping.
+-- CREATE POLICY "Allow examinees to view their own data (if self-service portal)"
+--   ON public.examinees
+--   FOR SELECT TO authenticated
+--   USING (id = auth.uid()); -- Assuming examinee user id matches examinee record id - unlikely; more complex logic needed

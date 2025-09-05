@@ -1,0 +1,215 @@
+
+CREATE OR REPLACE FUNCTION public.create_exam_with_fees(
+    p_exam_details JSONB, -- Expects: name, registration_deadline, starting_registration_number, registration_fee_regular, etc.
+    p_exam_fees JSONB[] -- Array of objects: {marhala_id, starting_roll_number, regular_fee, etc.}
+)
+RETURNS JSONB -- Returns the created exam's basic info (e.g., id, name, status)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_exam_id UUID;
+    v_exam_fee_item JSONB;
+    v_created_exam_name TEXT;
+    v_created_exam_status TEXT;
+    v_created_exam_created_at TIMESTAMPTZ;
+    v_created_exam_details JSONB;
+    v_user_role TEXT;
+    v_current_user_id UUID;
+    
+    -- Variables for robust casting
+    temp_text TEXT;
+    _name TEXT;
+    _registration_deadline TIMESTAMPTZ;
+    _starting_registration_number INTEGER;
+    _registration_fee_regular INTEGER;
+    _registration_fee_irregular INTEGER;
+    _late_registration_fee_regular INTEGER;
+    _late_registration_fee_irregular INTEGER;
+    _is_active BOOLEAN;
+
+    _marhala_id UUID;
+    _starting_roll_number INTEGER;
+    _regular_fee INTEGER;
+    _irregular_fee INTEGER;
+    _late_regular_fee_marhala INTEGER; -- Renamed to avoid conflict
+    _late_irregular_fee_marhala INTEGER; -- Renamed to avoid conflict
+
+BEGIN
+    RAISE INFO 'create_exam_with_fees: Function started.';
+    v_current_user_id := auth.uid();
+    RAISE INFO 'create_exam_with_fees: Current User ID: %', v_current_user_id;
+
+    IF v_current_user_id IS NULL THEN
+        RAISE EXCEPTION 'ব্যবহারকারী আইডি পাওয়া যায়নি। আপনি কি লগইন অবস্থায় আছেন?' USING ERRCODE = '42704'; -- undefined_object or similar
+    END IF;
+
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'আপনার ব্যবহারকারী প্রোফাইল (এবং রোল) user_profiles টেবিলে পাওয়া যায়নি। আইডি: %', v_current_user_id
+        USING ERRCODE = 'P0002', HINT = 'সিস্টেম এডমিনের সাথে যোগাযোগ করুন।';
+    END IF;
+    RAISE INFO 'create_exam_with_fees: User role validated: %', v_user_role;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'পরীক্ষা তৈরির অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+    
+    -- Validate p_exam_details robustly
+    _name := p_exam_details->>'name';
+    IF _name IS NULL OR TRIM(_name) = '' THEN RAISE EXCEPTION 'পরীক্ষার নাম আবশ্যক।'; END IF;
+    RAISE INFO 'create_exam_with_fees: Parsed name: %', _name;
+
+    temp_text := p_exam_details->>'registration_deadline';
+    IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'নিবন্ধনের শেষ তারিখ আবশ্যক।'; END IF;
+    BEGIN _registration_deadline := temp_text::TIMESTAMPTZ; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'নিবন্ধনের শেষ তারিখ (%s) সঠিক ফরম্যাটে নেই।', temp_text; END;
+    RAISE INFO 'create_exam_with_fees: Parsed registration_deadline: %', _registration_deadline;
+
+    temp_text := p_exam_details->>'starting_registration_number';
+    IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'নিবন্ধন শুরুর নম্বর আবশ্যক।'; END IF;
+    BEGIN _starting_registration_number := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'নিবন্ধন শুরুর নম্বর (%s) একটি সঠিক সংখ্যা নয়।', temp_text; END;
+    IF _starting_registration_number <= 0 THEN RAISE EXCEPTION 'নিবন্ধন শুরুর নম্বর একটি ধনাত্মক সংখ্যা হতে হবে।'; END IF;
+    RAISE INFO 'create_exam_with_fees: Parsed starting_registration_number: %', _starting_registration_number;
+
+    temp_text := p_exam_details->>'registration_fee_regular';
+    IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'নিবন্ধন ফি (নিয়মিত) আবশ্যক।'; END IF;
+    BEGIN _registration_fee_regular := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'নিবন্ধন ফি (নিয়মিত) (%s) একটি সঠিক সংখ্যা নয়।', temp_text; END;
+    IF _registration_fee_regular < 0 THEN RAISE EXCEPTION 'নিবন্ধন ফি (নিয়মিত) একটি অঋণাত্মক সংখ্যা হতে হবে।'; END IF;
+    RAISE INFO 'create_exam_with_fees: Parsed registration_fee_regular: %', _registration_fee_regular;
+    
+    temp_text := p_exam_details->>'registration_fee_irregular';
+    IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'নিবন্ধন ফি (অনিয়মিত) আবশ্যক।'; END IF;
+    BEGIN _registration_fee_irregular := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'নিবন্ধন ফি (অনিয়মিত) (%s) একটি সঠিক সংখ্যা নয়।', temp_text; END;
+    IF _registration_fee_irregular < 0 THEN RAISE EXCEPTION 'নিবন্ধন ফি (অনিয়মিত) একটি অঋণাত্মক সংখ্যা হতে হবে।'; END IF;
+    RAISE INFO 'create_exam_with_fees: Parsed registration_fee_irregular: %', _registration_fee_irregular;
+
+    temp_text := p_exam_details->>'late_registration_fee_regular';
+    IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'বিলম্ব ফি সহ নিয়মিত নিবন্ধন ফি আবশ্যক।'; END IF;
+    BEGIN _late_registration_fee_regular := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'বিলম্ব ফি সহ নিয়মিত নিবন্ধন ফি (%s) একটি সঠিক সংখ্যা নয়।', temp_text; END;
+    IF _late_registration_fee_regular < 0 THEN RAISE EXCEPTION 'বিলম্ব ফি সহ নিয়মিত নিবন্ধন ফি একটি অঋণাত্মক সংখ্যা হতে হবে।'; END IF;
+    RAISE INFO 'create_exam_with_fees: Parsed late_registration_fee_regular: %', _late_registration_fee_regular;
+
+    temp_text := p_exam_details->>'late_registration_fee_irregular';
+    IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'বিলম্ব ফি সহ অনিয়মিত নিবন্ধন ফি আবশ্যক।'; END IF;
+    BEGIN _late_registration_fee_irregular := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'বিলম্ব ফি সহ অনিয়মিত নিবন্ধন ফি (%s) একটি সঠিক সংখ্যা নয়।', temp_text; END;
+    IF _late_registration_fee_irregular < 0 THEN RAISE EXCEPTION 'বিলম্ব ফি সহ অনিয়মিত নিবন্ধন ফি একটি অঋণাত্মক সংখ্যা হতে হবে।'; END IF;
+    RAISE INFO 'create_exam_with_fees: Parsed late_registration_fee_irregular: %', _late_registration_fee_irregular;
+    
+    _is_active := COALESCE((p_exam_details->>'is_active')::BOOLEAN, TRUE);
+    RAISE INFO 'create_exam_with_fees: Parsed is_active: %', _is_active;
+
+    RAISE INFO 'create_exam_with_fees: About to insert into public.exams.';
+    -- Insert into exams table
+    INSERT INTO public.exams (
+        name, registration_deadline, starting_registration_number,
+        registration_fee_regular, registration_fee_irregular,
+        late_registration_fee_regular, late_registration_fee_irregular,
+        is_active, status, created_at, updated_at
+    )
+    VALUES (
+        _name, _registration_deadline, _starting_registration_number,
+        _registration_fee_regular, _registration_fee_irregular,
+        _late_registration_fee_regular, _late_registration_fee_irregular,
+        _is_active, 'pending', NOW(), NOW()
+    )
+    RETURNING id, name, status, created_at INTO v_new_exam_id, v_created_exam_name, v_created_exam_status, v_created_exam_created_at;
+    
+    RAISE INFO 'create_exam_with_fees: Inserted into public.exams. New exam ID: %', v_new_exam_id;
+
+    v_created_exam_details := jsonb_build_object(
+        'id', v_new_exam_id,
+        'name', v_created_exam_name,
+        'status', v_created_exam_status,
+        'createdAt', v_created_exam_created_at::TEXT 
+    );
+
+    -- Insert into exam_marhala_fees table
+    IF p_exam_fees IS NOT NULL AND array_length(p_exam_fees, 1) > 0 THEN
+        RAISE INFO 'create_exam_with_fees: Processing exam_marhala_fees. Count: %', array_length(p_exam_fees, 1);
+        FOREACH v_exam_fee_item IN ARRAY p_exam_fees
+        LOOP
+            RAISE INFO 'create_exam_with_fees: Processing fee item: %', v_exam_fee_item;
+            temp_text := v_exam_fee_item->>'marhala_id';
+            IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'মারহালা ফি এর জন্য মারহালা আইডি আবশ্যক।'; END IF;
+            BEGIN _marhala_id := temp_text::UUID; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'মারহালা আইডি (%s) সঠিক UUID ফরম্যাটে নেই।', temp_text; END;
+            RAISE INFO 'create_exam_with_fees: Parsed marhala_id: %', _marhala_id;
+            
+            PERFORM 1 FROM public.marhalas WHERE id = _marhala_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'প্রদত্ত মারহালা আইডি (%) মারহালা টেবিলে পাওয়া যায়নি।', _marhala_id USING ERRCODE = '23503'; END IF;
+            RAISE INFO 'create_exam_with_fees: Marhala ID % validated.', _marhala_id;
+
+            temp_text := v_exam_fee_item->>'starting_roll_number';
+            IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'মারহালা (%s) এর শুরুর রোল নম্বর আবশ্যক।', _marhala_id; END IF;
+            BEGIN _starting_roll_number := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'মারহালা (%s) এর শুরুর রোল নম্বর (%s) একটি সঠিক সংখ্যা নয়।', _marhala_id, temp_text; END;
+            IF _starting_roll_number <= 0 THEN RAISE EXCEPTION 'মারহালা (%s) এর শুরুর রোল নম্বর একটি ধনাত্মক সংখ্যা হতে হবে।', _marhala_id; END IF;
+            RAISE INFO 'create_exam_with_fees: Parsed starting_roll_number: % for marhala %', _starting_roll_number, _marhala_id;
+
+            temp_text := v_exam_fee_item->>'regular_fee';
+            IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার ফি (নিয়মিত) আবশ্যক।', _marhala_id; END IF;
+            BEGIN _regular_fee := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার ফি (নিয়মিত) (%s) একটি সঠিক সংখ্যা নয়।', _marhala_id, temp_text; END;
+            IF _regular_fee < 0 THEN RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার ফি (নিয়মিত) একটি অঋণাত্মক সংখ্যা হতে হবে।', _marhala_id; END IF;
+            RAISE INFO 'create_exam_with_fees: Parsed regular_fee: % for marhala %', _regular_fee, _marhala_id;
+            
+            temp_text := v_exam_fee_item->>'irregular_fee';
+            IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার ফি (অনিয়মিত) আবশ্যক।', _marhala_id; END IF;
+            BEGIN _irregular_fee := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার ফি (অনিয়মিত) (%s) একটি সঠিক সংখ্যা নয়।', _marhala_id, temp_text; END;
+            IF _irregular_fee < 0 THEN RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার ফি (অনিয়মিত) একটি অঋণাত্মক সংখ্যা হতে হবে।', _marhala_id; END IF;
+            RAISE INFO 'create_exam_with_fees: Parsed irregular_fee: % for marhala %', _irregular_fee, _marhala_id;
+
+            temp_text := v_exam_fee_item->>'late_regular_fee';
+            IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (নিয়মিত) আবশ্যক।', _marhala_id; END IF;
+            BEGIN _late_regular_fee_marhala := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (নিয়মিত) (%s) একটি সঠিক সংখ্যা নয়।', _marhala_id, temp_text; END;
+            IF _late_regular_fee_marhala < 0 THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (নিয়মিত) একটি অঋণাত্মক সংখ্যা হতে হবে।', _marhala_id; END IF;
+            RAISE INFO 'create_exam_with_fees: Parsed late_regular_fee_marhala: % for marhala %', _late_regular_fee_marhala, _marhala_id;
+
+            temp_text := v_exam_fee_item->>'late_irregular_fee';
+            IF temp_text IS NULL OR temp_text = '' THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (অনিয়মিত) আবশ্যক।', _marhala_id; END IF;
+            BEGIN _late_irregular_fee_marhala := temp_text::INTEGER; EXCEPTION WHEN invalid_text_representation THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (অনিয়মিত) (%s) একটি সঠিক সংখ্যা নয়।', _marhala_id, temp_text; END;
+            IF _late_irregular_fee_marhala < 0 THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (অনিয়মিত) একটি অঋণাত্মক সংখ্যা হতে হবে।', _marhala_id; END IF;
+            RAISE INFO 'create_exam_with_fees: Parsed late_irregular_fee_marhala: % for marhala %', _late_irregular_fee_marhala, _marhala_id;
+
+            RAISE INFO 'create_exam_with_fees: About to insert into exam_marhala_fees for marhala_id: %', _marhala_id;
+            INSERT INTO public.exam_marhala_fees (
+                exam_id, marhala_id, starting_roll_number, regular_fee, irregular_fee,
+                late_regular_fee, late_irregular_fee, created_at, updated_at
+            )
+            VALUES (
+                v_new_exam_id, _marhala_id, _starting_roll_number, _regular_fee, _irregular_fee,
+                _late_regular_fee_marhala, _late_irregular_fee_marhala, NOW(), NOW()
+            );
+            RAISE INFO 'create_exam_with_fees: Inserted into exam_marhala_fees for marhala_id: %', _marhala_id;
+        END LOOP;
+    END IF;
+
+    RAISE INFO 'create_exam_with_fees: Function completed successfully. Returning: %', v_created_exam_details;
+    RETURN v_created_exam_details;
+EXCEPTION
+    WHEN unique_violation THEN
+        IF SQLERRM LIKE '%exams_name_key%' THEN
+            RAISE EXCEPTION 'এই নামে একটি পরীক্ষা ইতিমধ্যে বিদ্যমান: "%"', _name
+            USING ERRCODE = '23505';
+        ELSIF SQLERRM LIKE '%exam_marhala_fees_exam_id_marhala_id_key%' THEN
+             RAISE EXCEPTION 'একটি পরীক্ষার জন্য কোনো মারহালা একাধিকবার যোগ করা যাবে না।'
+             USING ERRCODE = '23505';
+        ELSE
+            RAISE INFO 'Unique violation in create_exam_with_fees: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+            RAISE; 
+        END IF;
+    WHEN foreign_key_violation THEN
+        RAISE INFO 'Foreign key violation in create_exam_with_fees: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE EXCEPTION 'সম্পর্কিত তথ্য (যেমন মারহালা) পাওয়া যায়নি। অনুগ্রহ করে সঠিক আইডি ব্যবহার করুন।';
+    WHEN invalid_text_representation THEN
+        RAISE INFO 'Invalid text representation error in create_exam_with_fees: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE EXCEPTION 'প্রদত্ত তথ্যের ফরম্যাট সঠিক নয়। যেমন, সংখ্যার জায়গায় অক্ষর দেওয়া হয়েছে।';
+    WHEN not_null_violation THEN
+        RAISE INFO 'NOT NULL constraint violation in create_exam_with_fees: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE EXCEPTION 'আবশ্যকীয় কোনো ফিল্ড খালি রাখা হয়েছে। অনুগ্রহ করে সব আবশ্যক ফিল্ড পূরণ করুন। (কলাম: %, টেবিল: %)', SQLERRM_COLUMN_NAME, SQLERRM_TABLE_NAME
+        USING ERRCODE = '22004'; -- null_value_not_allowed
+    WHEN others THEN
+        RAISE INFO 'Error in create_exam_with_fees (WHEN others): SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE EXCEPTION 'পরীক্ষা তৈরি করার সময় একটি অপ্রত্যাশিত ত্রুটি ঘটেছে। অনুগ্রহ করে আবার চেষ্টা করুন অথবা সাপোর্টে যোগাযোগ করুন এবং ডাটাবেজ লগ চেক করুন (SQLSTATE: %, SQLERRM: %)।', SQLSTATE, SQLERRM
+        USING ERRCODE = 'P0001';
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_exam_with_fees(JSONB, JSONB[]) TO authenticated;

@@ -1,0 +1,17 @@
+
+CREATE OR REPLACE FUNCTION public.get_examiners_for_exam(p_exam_id UUID)
+RETURNS SETOF public.teachers
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT t.*
+    FROM public.teachers t
+    JOIN public.exam_personnel_assignments epa ON t.id = epa.personnel_id
+    WHERE epa.exam_id = p_exam_id
+      AND epa.assigned_role = 'mumtahin'
+      AND t.is_active = TRUE
+    ORDER BY t.name_bn;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_examiners_for_exam(UUID) TO authenticated;

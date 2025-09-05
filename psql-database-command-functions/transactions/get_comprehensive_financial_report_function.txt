@@ -1,0 +1,140 @@
+-- Function: public.get_comprehensive_financial_report
+-- Purpose: Retrieves an aggregated financial report including inspection fees for a given date range.
+-- Returns: A single JSONB object containing summary, details, and chart data.
+
+CREATE OR REPLACE FUNCTION public.get_comprehensive_financial_report(
+    p_start_date DATE,
+    p_end_date DATE
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_report JSONB;
+BEGIN
+    WITH transactions_in_range AS (
+        SELECT
+            id::text, -- Cast UUID to text for UNION compatibility
+            transaction_date,
+            category_id,
+            type,
+            party_name,
+            description,
+            amount,
+            created_at
+        FROM public.transactions
+        WHERE transaction_date >= p_start_date AND transaction_date <= p_end_date
+    ),
+    fee_collections_in_range AS (
+        SELECT
+            fcp.receipt_no::text AS id, -- Using receipt_no as a unique ID for display, cast to text for compatibility
+            fcp.payment_date AS transaction_date,
+            NULL::UUID AS category_id, -- No direct category_id for fee collections
+            'income'::text AS type,
+            m.name_bn AS party_name, -- Madrasa name as party
+            CASE
+                WHEN c.collection_type = 'registration_fee' THEN 'Registration Fee Collection'
+                WHEN c.collection_type = 'exam_fee' THEN 'Exam Fee Collection'
+                ELSE 'Fee Collection'
+            END AS description,
+            fcp.amount,
+            fcp.created_at
+        FROM public.fee_collection_payments fcp
+        JOIN public.collections c ON fcp.collection_id = c.id
+        JOIN public.madrasas m ON c.madrasa_id = m.id
+        WHERE fcp.payment_date >= p_start_date AND fcp.payment_date <= p_end_date
+    ),
+    all_transactions_in_range AS (
+        SELECT
+            id,
+            transaction_date,
+            category_id,
+            type,
+            party_name,
+            description,
+            amount,
+            created_at
+        FROM transactions_in_range
+        UNION ALL
+        SELECT
+            id,
+            transaction_date,
+            category_id,
+            type,
+            party_name,
+            description,
+            amount,
+            created_at
+        FROM fee_collections_in_range
+    ),
+    inspection_income AS (
+        SELECT COALESCE(SUM((fee_item->>'amount')::NUMERIC), 0) as total_inspection_fee
+        FROM public.madrasa_inspections mi,
+        LATERAL jsonb_array_elements(mi.fees) AS fee_item
+        WHERE mi.inspection_date >= p_start_date AND mi.inspection_date <= p_end_date
+    ),
+    summary AS (
+        SELECT
+            COALESCE(SUM(amount) FILTER (WHERE type = 'income'), 0) AS total_transaction_income,
+            COALESCE(SUM(amount) FILTER (WHERE type = 'expense'), 0) AS total_expense
+        FROM all_transactions_in_range
+    ),
+    details AS (
+        SELECT
+            t.id, t.transaction_date::text,
+            CASE
+                WHEN t.category_id IS NOT NULL THEN tc.name
+                WHEN t.type = 'income' AND t.description = 'Registration Fee Collection' THEN 'Registration Fee Income'
+                WHEN t.type = 'income' AND t.description = 'Exam Fee Collection' THEN 'Exam Fee Income'
+                ELSE 'Other Income/Expense'
+            END AS category_name,
+            t.type,
+            t.party_name,
+            t.description,
+            t.amount
+        FROM all_transactions_in_range t
+        LEFT JOIN public.transaction_categories tc ON t.category_id = tc.id
+        ORDER BY t.transaction_date DESC, t.created_at DESC
+    ),
+    category_summary AS (
+        SELECT
+            CASE
+                WHEN t.category_id IS NOT NULL THEN tc.name
+                WHEN t.type = 'income' AND t.description = 'Registration Fee Collection' THEN 'Registration Fee Income'
+                WHEN t.type = 'income' AND t.description = 'Exam Fee Collection' THEN 'Exam Fee Income'
+                ELSE 'Other Income/Expense'
+            END AS category_name,
+            SUM(t.amount) AS total_amount
+        FROM all_transactions_in_range t
+        LEFT JOIN public.transaction_categories tc ON t.category_id = tc.id
+        WHERE t.type = 'expense' OR (t.type = 'income' AND (t.description = 'Registration Fee Collection' OR t.description = 'Exam Fee Collection')) -- Include income categories for summary
+        GROUP BY category_name ORDER BY total_amount DESC
+    ),
+    monthly_summary AS (
+        SELECT
+            to_char(transaction_date, 'YYYY-MM') AS month,
+            SUM(amount) FILTER (WHERE type = 'income') AS total_income,
+            SUM(amount) FILTER (WHERE type = 'expense') AS total_expense
+        FROM all_transactions_in_range
+        GROUP BY month ORDER BY month ASC
+    )
+    SELECT jsonb_build_object(
+        'summary', jsonb_build_object(
+            'total_transaction_income', (SELECT total_transaction_income FROM summary),
+            'total_inspection_income', (SELECT total_inspection_fee FROM inspection_income),
+            'total_expense', (SELECT total_expense FROM summary),
+            'net_profit_loss', (SELECT total_transaction_income FROM summary) + (SELECT total_inspection_fee FROM inspection_income) - (SELECT total_expense FROM summary)
+        ),
+        'details', COALESCE((SELECT jsonb_agg(d) FROM details d), '[]'::jsonb),
+        'category_summary', COALESCE((SELECT jsonb_agg(cs) FROM category_summary cs), '[]'::jsonb),
+        'monthly_summary', COALESCE((SELECT jsonb_agg(ms) FROM monthly_summary ms), '[]'::jsonb)
+    )
+    INTO v_report;
+
+    RETURN v_report;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_comprehensive_financial_report(DATE, DATE) TO authenticated;

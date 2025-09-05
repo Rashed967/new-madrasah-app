@@ -1,0 +1,57 @@
+
+-- handle_updated_at ফাংশন (যদি আগে তৈরি না হয়ে থাকে)
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at() ... (পূর্ববর্তী ফাইলগুলোতে আছে)
+
+-- exams টেবিল তৈরি করার কমান্ড
+-- যদি টেবিলটি আগে থেকেই থাকে, তাহলে ALTER TABLE ব্যবহার করে কলাম যোগ বা পরিবর্তন করুন।
+-- নতুন করে তৈরি করলে, পুরনো টেবিল ড্রপ করার আগে ডেটা ব্যাকআপ নিয়ে নিন।
+CREATE TABLE IF NOT EXISTS public.exams (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    registration_deadline TIMESTAMPTZ NOT NULL,
+    starting_registration_number INTEGER NOT NULL CHECK (starting_registration_number > 0),
+    last_used_registration_number INTEGER, -- Optional: For tracking last assigned reg number globally for this exam
+    registration_fee_regular INTEGER NOT NULL CHECK (registration_fee_regular >= 0),
+    registration_fee_irregular INTEGER NOT NULL CHECK (registration_fee_irregular >= 0),
+    late_registration_fee_regular INTEGER NOT NULL CHECK (late_registration_fee_regular >= 0),
+    late_registration_fee_irregular INTEGER NOT NULL CHECK (late_registration_fee_irregular >= 0),
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    status TEXT DEFAULT 'pending' NOT NULL CHECK (status IN (
+        'pending',
+        'preparatory',
+        'ongoing',
+        'completed',
+        'cancelled'
+    )),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_exams_name ON public.exams(name);
+CREATE INDEX IF NOT EXISTS idx_exams_status ON public.exams(status);
+CREATE INDEX IF NOT EXISTS idx_exams_is_active ON public.exams(is_active);
+CREATE INDEX IF NOT EXISTS idx_exams_registration_deadline ON public.exams(registration_deadline);
+
+-- updated_at কলামের জন্য ট্রিগার
+DROP TRIGGER IF EXISTS on_exams_updated ON public.exams;
+CREATE TRIGGER on_exams_updated
+BEFORE UPDATE ON public.exams
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies (উদাহরণ - আপনার প্রয়োজন অনুযায়ী পরিবর্তন করুন)
+-- ALTER TABLE public.exams ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow public read access for exams" ON public.exams FOR SELECT USING (true);
+-- CREATE POLICY "Allow admin full access for exams" 
+--   ON public.exams 
+--   FOR ALL 
+--   TO authenticated 
+--   USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+--   WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+-- নিশ্চিত করুন যে exam_marhala_fees টেবিলে exam_id এর জন্য foreign key constraint সঠিকভাবে এই টেবিলের id কলামকে নির্দেশ করছে।
+-- ALTER TABLE public.exam_marhala_fees
+-- ADD CONSTRAINT exam_marhala_fees_exam_id_fkey
+-- FOREIGN KEY (exam_id) REFERENCES public.exams(id) ON DELETE CASCADE;
+-- (যদি constraint আগে থেকে থাকে এবং সমস্যা করে, তাহলে DROP করে আবার ADD করতে পারেন।)

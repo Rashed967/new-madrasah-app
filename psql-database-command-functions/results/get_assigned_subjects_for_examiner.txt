@@ -1,0 +1,48 @@
+CREATE OR REPLACE FUNCTION public.get_assigned_subjects_for_examiner(
+    p_exam_id UUID,
+    p_examiner_id UUID
+)
+RETURNS TABLE (
+    kitab_id UUID,
+    kitab_name TEXT,
+    marhala_name TEXT,
+    total_scripts BIGINT,
+    entered_marks_count BIGINT,
+    full_marks INTEGER
+)
+LANGUAGE sql STABLE SECURITY DEFINER AS $$
+WITH examiner_scripts AS (
+    SELECT
+        d.examinee_id,
+        a.kitab_id,
+        a.marhala_id
+    FROM
+        public.answer_script_distributions a
+    JOIN
+        public.distributed_script_details d ON a.id = d.distribution_id
+    WHERE
+        a.exam_id = p_exam_id
+        AND a.examiner_teacher_id = p_examiner_id
+)
+SELECT
+    es.kitab_id,
+    k.name_bn AS kitab_name,
+    m.name_bn AS marhala_name,
+    COUNT(es.examinee_id) AS total_scripts,
+    COUNT(mk.id) AS entered_marks_count,
+    k.full_marks
+FROM
+    examiner_scripts es
+JOIN
+    public.kitabs k ON es.kitab_id = k.id
+JOIN
+    public.marhalas m ON es.marhala_id = m.id
+LEFT JOIN
+    public.marks mk ON es.examinee_id = mk.examinee_id AND es.kitab_id = mk.kitab_id AND p_exam_id = mk.exam_id
+GROUP BY
+    es.kitab_id, k.name_bn, m.name_bn, k.full_marks
+ORDER BY
+    k.name_bn;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_assigned_subjects_for_examiner(UUID, UUID) TO authenticated;

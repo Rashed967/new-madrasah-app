@@ -1,0 +1,45 @@
+
+CREATE OR REPLACE FUNCTION public.get_public_stats()
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE 
+SECURITY DEFINER -- Changed to DEFINER for reliable access to count tables.
+AS $$
+DECLARE
+    v_total_madrasas INTEGER;
+    v_total_examinees_current_year INTEGER;
+    v_total_teachers INTEGER;
+    v_active_exam_id UUID;
+BEGIN
+    -- Get total madrasa count.
+    SELECT COUNT(*) INTO v_total_madrasas FROM public.madrasas;
+
+    -- Get total active teachers count.
+    SELECT COUNT(*) INTO v_total_teachers FROM public.teachers WHERE is_active = true;
+
+    -- Find the most recent relevant exam. An exam is relevant if it's not pending or cancelled.
+    -- Ordering by created_at DESC gets the latest one.
+    SELECT id INTO v_active_exam_id 
+    FROM public.exams 
+    WHERE status NOT IN ('pending', 'cancelled')
+    ORDER BY created_at DESC 
+    LIMIT 1;
+
+    -- Get total examinees for that exam.
+    IF v_active_exam_id IS NOT NULL THEN
+        SELECT COUNT(*) INTO v_total_examinees_current_year FROM public.examinees WHERE exam_id = v_active_exam_id;
+    ELSE
+        v_total_examinees_current_year := 0;
+    END IF;
+
+    -- Return snake_case keys as is conventional for databases.
+    RETURN jsonb_build_object(
+        'total_madrasas', COALESCE(v_total_madrasas, 0),
+        'total_examinees', COALESCE(v_total_examinees_current_year, 0),
+        'total_teachers', COALESCE(v_total_teachers, 0)
+    );
+END;
+$$;
+
+-- Grant execute permission to both anonymous and authenticated users.
+GRANT EXECUTE ON FUNCTION public.get_public_stats() TO anon, authenticated;

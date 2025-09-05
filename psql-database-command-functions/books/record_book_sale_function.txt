@@ -1,0 +1,48 @@
+
+CREATE OR REPLACE FUNCTION public.record_book_sale(
+    p_book_id UUID,
+    p_quantity_sold INTEGER,
+    p_customer_name TEXT,
+    p_notes TEXT
+)
+RETURNS book_sales
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_book_price NUMERIC;
+    v_current_stock INTEGER;
+    v_new_sale book_sales%ROWTYPE;
+BEGIN
+    -- Lock the book row and get current price and stock
+    SELECT price, current_stock INTO v_book_price, v_current_stock
+    FROM public.books WHERE id = p_book_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'বইটি খুঁজে পাওয়া যায়নি।';
+    END IF;
+
+    IF v_current_stock < p_quantity_sold THEN
+        RAISE EXCEPTION 'অপর্যাপ্ত স্টক। বর্তমানে % টি বই আছে।', v_current_stock;
+    END IF;
+
+    -- Update stock
+    UPDATE public.books
+    SET current_stock = current_stock - p_quantity_sold
+    WHERE id = p_book_id;
+
+    -- Record the sale
+    INSERT INTO public.book_sales (
+        book_id, quantity_sold, price_per_unit, total_amount, 
+        sale_date, customer_name, notes, created_by
+    )
+    VALUES (
+        p_book_id, p_quantity_sold, v_book_price, p_quantity_sold * v_book_price,
+        NOW(), p_customer_name, p_notes, auth.uid()
+    ) RETURNING * INTO v_new_sale;
+    
+    RETURN v_new_sale;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.record_book_sale(UUID, INTEGER, TEXT, TEXT) TO authenticated;

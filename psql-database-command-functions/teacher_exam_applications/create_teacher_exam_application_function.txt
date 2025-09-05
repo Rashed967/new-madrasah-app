@@ -1,0 +1,128 @@
+
+CREATE OR REPLACE FUNCTION public.create_teacher_exam_application(
+    p_application_data JSONB -- Expects all fields for teacher_exam_applications table
+)
+RETURNS teacher_exam_applications -- Returns the newly created application row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_application teacher_exam_applications%ROWTYPE;
+    v_current_user_id UUID := auth.uid();
+    v_teacher_id_from_mapping UUID;
+
+    -- Variables from p_application_data
+    _exam_id UUID;
+    _applying_from_madrasa_id UUID;
+    _preferred_marhala_category TEXT;
+    _kitabi_teaching_details TEXT;
+    _teaching_experience_years INTEGER;
+    _application_role_preference TEXT;
+    _preferred_role_type TEXT;
+    _preferred_kitabs_for_evaluation TEXT[];
+    _has_previous_experience BOOLEAN;
+    _previous_experience_role_type TEXT;
+    _previous_experience_kitab_names TEXT[];
+    _notes_by_applicant TEXT;
+
+BEGIN
+    IF v_current_user_id IS NULL THEN
+        RAISE EXCEPTION 'আবেদন করার জন্য আপনাকে অবশ্যই লগইন করতে হবে।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Get teacher_id from teacher_user_mapping
+    SELECT teacher_id INTO v_teacher_id_from_mapping
+    FROM public.teacher_user_mapping
+    WHERE user_id = v_current_user_id;
+
+    IF v_teacher_id_from_mapping IS NULL THEN
+        RAISE EXCEPTION 'আপনার শিক্ষক প্রোফাইল খুঁজে পাওয়া যায়নি। আবেদন করা সম্ভব নয়।';
+    END IF;
+
+    -- Extract and validate data from p_application_data
+    _exam_id := (p_application_data->>'exam_id')::UUID;
+    IF _exam_id IS NULL THEN RAISE EXCEPTION 'পরীক্ষা আইডি আবশ্যক।'; END IF;
+    
+    -- Check exam status
+    PERFORM 1 FROM public.exams 
+    WHERE id = _exam_id 
+      AND status = 'preparatory';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'এই পরীক্ষার (%s) জন্য এখন আবেদন করা যাবে না। পরীক্ষার স্ট্যাটাস আবেদনযোগ্য নয়।', _exam_id;
+    END IF;
+
+    _applying_from_madrasa_id := (p_application_data->>'applying_from_madrasa_id')::UUID; -- Can be NULL
+    IF _applying_from_madrasa_id IS NOT NULL THEN
+        PERFORM 1 FROM public.madrasas WHERE id = _applying_from_madrasa_id;
+        IF NOT FOUND THEN RAISE EXCEPTION 'প্রদত্ত মাদরাসা আইডি খুঁজে পাওয়া যায়নি।'; END IF;
+    END IF;
+
+    _preferred_marhala_category := p_application_data->>'preferred_marhala_category';
+    IF _preferred_marhala_category IS NULL OR NOT (_preferred_marhala_category IN ('darsiyat', 'hifz')) THEN RAISE EXCEPTION 'পছন্দের মারহালা ক্যাটাগরি (darsiyat/hifz) আবশ্যক।'; END IF;
+    
+    _kitabi_teaching_details := p_application_data->>'kitabi_teaching_details';
+    IF _kitabi_teaching_details IS NULL OR TRIM(_kitabi_teaching_details) = '' THEN RAISE EXCEPTION 'কিতাবী শিক্ষাদানের বিবরণ আবশ্যক।'; END IF;
+
+    _teaching_experience_years := (p_application_data->>'teaching_experience_years')::INTEGER;
+    IF _teaching_experience_years IS NULL OR _teaching_experience_years < 0 THEN RAISE EXCEPTION 'শিক্ষকতার অভিজ্ঞতা অবশ্যই ০ বা তার বেশি হতে হবে।'; END IF;
+
+    _application_role_preference := p_application_data->>'application_role_preference';
+    IF _application_role_preference IS NULL OR NOT (_application_role_preference IN ('negran', 'mumtahin', 'both')) THEN RAISE EXCEPTION 'আবেদনের ভূমিকা (negran/mumtahin/both) আবশ্যক।'; END IF;
+
+    _preferred_role_type := p_application_data->>'preferred_role_type';
+    IF _preferred_role_type IS NULL OR NOT (_preferred_role_type IN ('head', 'assistant')) THEN RAISE EXCEPTION 'পছন্দের দায়িত্বের ধরণ (head/assistant) আবশ্যক।'; END IF;
+
+    _preferred_kitabs_for_evaluation := ARRAY(SELECT jsonb_array_elements_text(p_application_data->'preferred_kitabs_for_evaluation'));
+    IF (_application_role_preference = 'mumtahin' OR _application_role_preference = 'both') AND 
+       (_preferred_kitabs_for_evaluation IS NULL OR array_length(_preferred_kitabs_for_evaluation, 1) IS NULL OR array_length(_preferred_kitabs_for_evaluation, 1) = 0) THEN
+        RAISE EXCEPTION 'মুমতাহিন/উভয় ভূমিকার জন্য কমপক্ষে একটি পছন্দের কিতাব নির্বাচন করুন।';
+    END IF;
+
+    _has_previous_experience := (p_application_data->>'has_previous_experience')::BOOLEAN;
+    IF _has_previous_experience IS NULL THEN _has_previous_experience := FALSE; END IF;
+
+    _previous_experience_role_type := p_application_data->>'previous_experience_role_type';
+    IF _has_previous_experience AND (_previous_experience_role_type IS NULL OR NOT (_previous_experience_role_type IN ('head', 'assistant'))) THEN
+        RAISE EXCEPTION 'পূর্ব অভিজ্ঞতার ক্ষেত্রে ভূমিকার ধরণ (head/assistant) আবশ্যক।';
+    END IF;
+    IF NOT _has_previous_experience THEN _previous_experience_role_type := NULL; END IF; -- Ensure consistency
+
+    _previous_experience_kitab_names := ARRAY(SELECT jsonb_array_elements_text(p_application_data->'previous_experience_kitab_names'));
+     IF _has_previous_experience AND (_application_role_preference = 'mumtahin' OR _application_role_preference = 'both') AND
+       (_previous_experience_kitab_names IS NULL OR array_length(_previous_experience_kitab_names, 1) IS NULL OR array_length(_previous_experience_kitab_names, 1) = 0) THEN
+        RAISE WARNING 'পূর্ব অভিজ্ঞতাসম্পন্ন মুমতাহিনের জন্য অভিজ্ঞতার কিতাব উল্লেখ করা হয়নি।';
+    END IF;
+
+    _notes_by_applicant := p_application_data->>'notes_by_applicant';
+
+    -- Check for existing application by this teacher for this exam
+    PERFORM 1 FROM public.teacher_exam_applications
+    WHERE teacher_id = v_teacher_id_from_mapping AND exam_id = _exam_id;
+    IF FOUND THEN
+        RAISE EXCEPTION 'আপনি ইতিমধ্যে এই পরীক্ষার জন্য আবেদন করেছেন।' USING ERRCODE = '23505';
+    END IF;
+
+    INSERT INTO public.teacher_exam_applications (
+        teacher_id, exam_id, applying_from_madrasa_id,
+        preferred_marhala_category, kitabi_teaching_details, teaching_experience_years,
+        application_role_preference, preferred_role_type,
+        preferred_kitabs_for_evaluation,
+        has_previous_experience, previous_experience_role_type, previous_experience_kitab_names,
+        notes_by_applicant,
+        application_status, application_date, created_at, updated_at
+    ) VALUES (
+        v_teacher_id_from_mapping, _exam_id, _applying_from_madrasa_id,
+        _preferred_marhala_category, _kitabi_teaching_details, _teaching_experience_years,
+        _application_role_preference, _preferred_role_type,
+        CASE WHEN _application_role_preference IN ('mumtahin', 'both') THEN _preferred_kitabs_for_evaluation ELSE NULL END,
+        _has_previous_experience, _previous_experience_role_type, 
+        CASE WHEN _has_previous_experience AND _application_role_preference IN ('mumtahin', 'both') THEN _previous_experience_kitab_names ELSE NULL END,
+        _notes_by_applicant,
+        'pending', NOW(), NOW(), NOW()
+    ) RETURNING * INTO v_new_application;
+
+    RETURN v_new_application;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_teacher_exam_application(JSONB) TO authenticated;

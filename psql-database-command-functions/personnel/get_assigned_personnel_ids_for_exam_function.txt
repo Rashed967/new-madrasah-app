@@ -1,0 +1,12 @@
+
+CREATE OR REPLACE FUNCTION public.get_assigned_personnel_ids_for_exam(p_exam_id UUID)
+RETURNS UUID[]
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE(array_agg(DISTINCT personnel_id), '{}'::UUID[])
+    FROM public.exam_personnel_assignments
+    WHERE exam_id = p_exam_id;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_assigned_personnel_ids_for_exam(UUID) TO authenticated;

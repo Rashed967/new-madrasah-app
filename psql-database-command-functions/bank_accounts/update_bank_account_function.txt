@@ -1,0 +1,55 @@
+
+CREATE OR REPLACE FUNCTION public.update_bank_account(
+    p_account_id UUID,
+    p_updates JSONB -- { "bank_name": "...", "branch_name": "...", ... }
+)
+RETURNS bank_accounts
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_account bank_accounts%ROWTYPE;
+    v_user_role TEXT;
+    _account_number TEXT := p_updates->>'account_number';
+BEGIN
+    -- Authorization check
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = auth.uid();
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'অ্যাকাউন্ট আপডেট করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Check for duplicate account number if it's being changed
+    IF _account_number IS NOT NULL THEN
+        PERFORM 1 FROM public.bank_accounts WHERE account_number = _account_number AND id <> p_account_id;
+        IF FOUND THEN
+            RAISE EXCEPTION 'এই অ্যাকাউন্ট নম্বরটি (%s) অন্য অ্যাকাউন্টে ব্যবহৃত হয়েছে।', _account_number USING ERRCODE = '23505';
+        END IF;
+    END IF;
+
+    -- Opening balance and date should not be updatable from here
+    IF p_updates ? 'opening_balance' OR p_updates ? 'opening_date' THEN
+        RAISE EXCEPTION 'প্রারম্ভিক ব্যালেন্স ও শুরুর তারিখ পরিবর্তনযোগ্য নয়।';
+    END IF;
+    
+    -- Update logic
+    UPDATE public.bank_accounts
+    SET 
+        bank_name = COALESCE(p_updates->>'bank_name', bank_name),
+        branch_name = COALESCE(p_updates->>'branch_name', branch_name),
+        account_name = COALESCE(p_updates->>'account_name', account_name),
+        account_number = COALESCE(_account_number, account_number),
+        account_type = COALESCE(p_updates->>'account_type', account_type),
+        is_active = COALESCE((p_updates->>'is_active')::BOOLEAN, is_active)
+        -- current_balance should be updated only through transactions, not directly here.
+    WHERE id = p_account_id
+    RETURNING * INTO v_updated_account;
+    
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত আইডি (%) সহ কোনো অ্যাকাউন্ট পাওয়া যায়নি।', p_account_id;
+    END IF;
+
+    RETURN v_updated_account;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_bank_account(UUID, JSONB) TO authenticated;

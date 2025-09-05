@@ -1,0 +1,108 @@
+
+
+CREATE OR REPLACE FUNCTION public.create_bank_transaction(
+    p_type TEXT, -- 'deposit', 'withdrawal', or 'transfer'
+    p_amount NUMERIC,
+    p_transaction_date DATE,
+    p_from_account_id UUID, -- Source account for withdrawal/transfer
+    p_to_account_id UUID,   -- Destination account for deposit/transfer
+    p_description TEXT,
+    p_check_number TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_user_role TEXT;
+    
+    from_balance_before NUMERIC;
+    from_balance_after NUMERIC;
+    to_balance_before NUMERIC;
+    to_balance_after NUMERIC;
+
+    withdrawal_tx_id UUID;
+    deposit_tx_id UUID;
+    temp_balance NUMERIC; -- Moved declaration here
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'লেনদেন করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_amount IS NULL OR p_amount <= 0 THEN
+        RAISE EXCEPTION 'লেনদেনের পরিমাণ অবশ্যই একটি ধনাত্মক সংখ্যা হতে হবে।';
+    END IF;
+
+    IF p_type = 'deposit' THEN
+        -- Lock the target account row to prevent race conditions
+        SELECT current_balance INTO to_balance_before FROM public.bank_accounts WHERE id = p_to_account_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'জমা করার জন্য অ্যাকাউন্ট আইডি (%) খুঁজে পাওয়া যায়নি।', p_to_account_id; END IF;
+        
+        to_balance_after := to_balance_before + p_amount;
+        UPDATE public.bank_accounts SET current_balance = to_balance_after WHERE id = p_to_account_id;
+
+        INSERT INTO public.bank_transactions (account_id, type, amount, transaction_date, description, check_number, balance_after, created_by)
+        VALUES (p_to_account_id, 'deposit', p_amount, p_transaction_date, p_description, p_check_number, to_balance_after, v_user_id)
+        RETURNING id INTO deposit_tx_id;
+        RETURN jsonb_build_object('success', true, 'deposit_tx_id', deposit_tx_id);
+
+    ELSIF p_type = 'withdrawal' THEN
+        SELECT current_balance INTO from_balance_before FROM public.bank_accounts WHERE id = p_from_account_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'উত্তোলনের জন্য অ্যাকাউন্ট আইডি (%) খুঁজে পাওয়া যায়নি।', p_from_account_id; END IF;
+        IF from_balance_before < p_amount THEN RAISE EXCEPTION 'অ্যাকাউন্টে অপর্যাপ্ত ব্যালেন্স।'; END IF;
+        
+        from_balance_after := from_balance_before - p_amount;
+        UPDATE public.bank_accounts SET current_balance = from_balance_after WHERE id = p_from_account_id;
+
+        INSERT INTO public.bank_transactions (account_id, type, amount, transaction_date, description, check_number, balance_after, created_by)
+        VALUES (p_from_account_id, 'withdrawal', p_amount, p_transaction_date, p_description, p_check_number, from_balance_after, v_user_id)
+        RETURNING id INTO withdrawal_tx_id;
+        RETURN jsonb_build_object('success', true, 'withdrawal_tx_id', withdrawal_tx_id);
+
+    ELSIF p_type = 'transfer' THEN
+        IF p_from_account_id = p_to_account_id THEN RAISE EXCEPTION 'উৎস এবং গন্তব্য অ্যাকাউন্ট একই হতে পারবে না।'; END IF;
+        
+        -- Lock both rows in a consistent order to prevent deadlocks
+        SELECT current_balance INTO from_balance_before FROM public.bank_accounts WHERE id = LEAST(p_from_account_id, p_to_account_id) FOR UPDATE;
+        SELECT current_balance INTO to_balance_before FROM public.bank_accounts WHERE id = GREATEST(p_from_account_id, p_to_account_id) FOR UPDATE;
+        -- Now get the correct initial balances
+        IF p_from_account_id < p_to_account_id THEN
+            -- Balances are already correct
+        ELSE
+            -- Swap them
+            temp_balance := from_balance_before;
+            from_balance_before := to_balance_before;
+            to_balance_before := temp_balance;
+        END IF;
+
+        IF from_balance_before < p_amount THEN RAISE EXCEPTION 'উৎস অ্যাকাউন্টে অপর্যাপ্ত ব্যালেন্স।'; END IF;
+
+        -- Perform withdrawal
+        from_balance_after := from_balance_before - p_amount;
+        UPDATE public.bank_accounts SET current_balance = from_balance_after WHERE id = p_from_account_id;
+        
+        INSERT INTO public.bank_transactions (account_id, type, amount, transaction_date, description, check_number, balance_after, created_by)
+        VALUES (p_from_account_id, 'transfer', p_amount, p_transaction_date, 'Transfer to ' || (SELECT account_name FROM bank_accounts WHERE id = p_to_account_id), p_check_number, from_balance_after, v_user_id)
+        RETURNING id INTO withdrawal_tx_id;
+
+        -- Perform deposit
+        to_balance_after := to_balance_before + p_amount;
+        UPDATE public.bank_accounts SET current_balance = to_balance_after WHERE id = p_to_account_id;
+
+        INSERT INTO public.bank_transactions (account_id, type, amount, transaction_date, description, check_number, balance_after, created_by, related_transaction_id)
+        VALUES (p_to_account_id, 'transfer', p_amount, p_transaction_date, 'Transfer from ' || (SELECT account_name FROM bank_accounts WHERE id = p_from_account_id), p_check_number, to_balance_after, v_user_id, withdrawal_tx_id)
+        RETURNING id INTO deposit_tx_id;
+        
+        -- Link withdrawal to deposit transaction
+        UPDATE public.bank_transactions SET related_transaction_id = deposit_tx_id WHERE id = withdrawal_tx_id;
+
+        RETURN jsonb_build_object('success', true, 'withdrawal_tx_id', withdrawal_tx_id, 'deposit_tx_id', deposit_tx_id);
+    ELSE
+        RAISE EXCEPTION 'অবৈধ লেনদেনের ধরণ: %।', p_type;
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_bank_transaction(TEXT, NUMERIC, DATE, UUID, UUID, TEXT, TEXT) TO authenticated;

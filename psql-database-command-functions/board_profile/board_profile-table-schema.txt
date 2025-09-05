@@ -1,0 +1,63 @@
+-- Ensure the handle_updated_at function exists
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at() ... (if not already created)
+
+CREATE TABLE IF NOT EXISTS public.board_profile (
+    id TEXT PRIMARY KEY DEFAULT 'MAIN_PROFILE', -- Using a fixed ID for a single profile row
+    board_name_bn TEXT NOT NULL,
+    board_name_en TEXT NOT NULL,
+    address JSONB NOT NULL, -- { holding, villageArea, postOffice, upazila, district, division }
+    primary_phone TEXT NOT NULL,
+    secondary_phone TEXT,
+    email TEXT NOT NULL,
+    website TEXT,
+    logo_url TEXT,
+    establishment_date DATE NOT NULL,
+    chairman JSONB NOT NULL, -- { name, mobile, email? }
+    secretary JSONB NOT NULL, -- { name, mobile, email? }
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    
+    CONSTRAINT board_profile_id_check CHECK (id = 'MAIN_PROFILE') -- Enforce single row with this ID
+);
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_board_profile_updated ON public.board_profile;
+CREATE TRIGGER on_board_profile_updated
+BEFORE UPDATE ON public.board_profile
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies (Example)
+-- ALTER TABLE public.board_profile ENABLE ROW LEVEL SECURITY;
+
+-- CREATE POLICY "Allow public read access for board profile" 
+-- ON public.board_profile FOR SELECT USING (true);
+
+-- CREATE POLICY "Allow admin update for board profile" 
+-- ON public.board_profile FOR UPDATE TO authenticated 
+-- USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+-- WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+-- Note: Insert policy might need special handling for the fixed ID or use an RPC function for upsert.
+-- A function is better as it can handle the insert or update logic for the single row.
+-- CREATE POLICY "Allow admin insert for board profile (initial setup)" 
+-- ON public.board_profile FOR INSERT TO authenticated 
+-- WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin') AND id = 'MAIN_PROFILE');
+-- No delete policy, this row should not be deleted.
+
+-- Initial Data (Optional - Can be inserted via UI or this script)
+-- INSERT INTO public.board_profile (
+--   id, board_name_bn, board_name_en, 
+--   address, primary_phone, email, establishment_date,
+--   chairman, secretary
+-- ) VALUES (
+--   'MAIN_PROFILE', 
+--   'জাতীয় দ্বীনি মাদরাসা শিক্ষাবোর্ড বাংলাদেশ', 
+--   'National Dini Madrasa Education Board Bangladesh',
+--   '{"villageArea": "বসুন্ধরা", "postOffice": "ঢাকা-১২৩০", "upazila": "ভাটারা", "district": "ঢাকা", "division": "ঢাকা"}',
+--   '01XXXXXXXXX', 
+--   'info@ndmeb.gov.bd', 
+--   '2016-01-01',
+--   '{"name": "চেয়ারম্যানের নাম", "mobile": "01XXXXXXXXX"}',
+--   '{"name": "সচিবের নাম", "mobile": "01YYYYYYYYY"}'
+-- ) ON CONFLICT (id) DO NOTHING;

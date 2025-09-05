@@ -1,0 +1,39 @@
+CREATE OR REPLACE FUNCTION public.delete_kitab(p_id UUID)
+RETURNS VOID -- Returns nothing on success, raises exception on failure
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    referencing_marhala_names TEXT;
+BEGIN
+    IF p_id IS NULL THEN
+        RAISE EXCEPTION 'কিতাব আইডি আবশ্যক (Kitab ID is required)';
+    END IF;
+
+    -- Check if the kitab_id is referenced in any marhalas.kitab_ids array
+    SELECT string_agg(m.name_bn, ', ')
+    INTO referencing_marhala_names
+    FROM public.marhalas m
+    WHERE p_id = ANY(m.kitab_ids);
+
+    IF referencing_marhala_names IS NOT NULL THEN
+        RAISE EXCEPTION 'এই কিতাবটি "%" মারহালা(সমূহে) ব্যবহৃত হয়েছে। প্রথমে মারহালা থেকে এই কিতাবটি সরিয়ে ফেলুন।', referencing_marhala_names
+        USING ERRCODE = '23503', -- foreign_key_violation (or a custom code)
+              DETAIL = 'Kitab is referenced in marhalas: ' || referencing_marhala_names,
+              HINT = 'Remove the kitab from all marhalas before deleting it.';
+    END IF;
+
+    -- Delete the kitab
+    DELETE FROM public.kitabs
+    WHERE id = p_id;
+
+    IF NOT FOUND THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো কিতাব পাওয়া যায়নি, তাই কিছুই মোছা হয়নি।', p_id;
+        -- Or RAISE EXCEPTION if you want deletion of non-existent to be an error
+    END IF;
+
+END;
+$$;
+
+-- Grant execute permission
+GRANT EXECUTE ON FUNCTION public.delete_kitab(UUID) TO authenticated;

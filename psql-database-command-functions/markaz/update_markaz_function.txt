@@ -1,0 +1,113 @@
+
+CREATE OR REPLACE FUNCTION public.update_markaz(
+    p_markaz_id UUID,
+    p_updates JSONB -- Expected format: {"name_bn": "...", "host_madrasa_id": "...", "zone_id": "...", "examinee_capacity": ..., "is_active": true/false}
+)
+RETURNS markazes -- Returns the updated markaz row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_markaz markazes%ROWTYPE;
+    v_current_markaz markazes%ROWTYPE;
+    v_user_role TEXT;
+    v_current_user_id UUID;
+
+    _name_bn TEXT; _host_madrasa_id UUID; _zone_id UUID;
+    _examinee_capacity INTEGER; _is_active BOOLEAN;
+    _new_markaz_code INTEGER; -- To store the new markaz_code if host changes
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'মারকায আপডেট করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    SELECT * INTO v_current_markaz FROM public.markazes WHERE id = p_markaz_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত আইডি (%) সহ কোনো মারকায পাওয়া যায়নি।', p_markaz_id;
+    END IF;
+
+    -- Extract values from p_updates JSONB, using current values as default
+    _name_bn                := COALESCE(p_updates->>'name_bn', v_current_markaz.name_bn);
+    _host_madrasa_id        := COALESCE((p_updates->>'host_madrasa_id')::UUID, v_current_markaz.host_madrasa_id);
+    _zone_id                := COALESCE((p_updates->>'zone_id')::UUID, v_current_markaz.zone_id);
+    _examinee_capacity      := COALESCE((p_updates->>'examinee_capacity')::INTEGER, v_current_markaz.examinee_capacity);
+    _is_active              := COALESCE((p_updates->>'is_active')::BOOLEAN, v_current_markaz.is_active);
+
+
+    -- Validations for new values
+    IF _name_bn IS NULL OR _name_bn = '' THEN RAISE EXCEPTION 'মারকাযের নাম আবশ্যক।'; END IF;
+    IF _host_madrasa_id IS NULL THEN RAISE EXCEPTION 'হোস্ট মাদরাসা আইডি আবশ্যক।'; END IF;
+    IF _zone_id IS NULL THEN RAISE EXCEPTION 'জোন আইডি আবশ্যক।'; END IF;
+    IF _examinee_capacity IS NULL OR _examinee_capacity <= 0 THEN RAISE EXCEPTION 'পরীক্ষার্থীর ধারণক্ষমতা অবশ্যই ধনাত্মক সংখ্যা হতে হবে।'; END IF;
+    IF _is_active IS NULL THEN RAISE EXCEPTION 'মারকাযের স্ট্যাটাস (is_active) আবশ্যক।'; END IF;
+
+
+    -- Check foreign keys if they changed
+    IF _host_madrasa_id <> v_current_markaz.host_madrasa_id THEN
+        PERFORM 1 FROM public.madrasas WHERE id = _host_madrasa_id;
+        IF NOT FOUND THEN RAISE EXCEPTION 'নতুন হোস্ট মাদরাসা আইডি (%) খুঁজে পাওয়া যায়নি।', _host_madrasa_id USING ERRCODE = '23503'; END IF;
+        
+        -- Host madrasa is changing, so markaz_code must also change to the new host's madrasa_code
+        SELECT madrasa_code INTO _new_markaz_code
+        FROM public.madrasas
+        WHERE id = _host_madrasa_id;
+
+        IF _new_markaz_code IS NULL THEN
+             RAISE EXCEPTION 'নতুন হোস্ট মাদ্রাসার (%s) জন্য মাদরাসা কোড পাওয়া যায়নি। মারকায কোড আপডেট করা সম্ভব নয়।', _host_madrasa_id;
+        END IF;
+        
+        -- Check if this new markaz_code (which is a madrasa_code) already exists for another markaz
+        PERFORM 1 FROM public.markazes WHERE markaz_code = _new_markaz_code AND id <> p_markaz_id;
+        IF FOUND THEN
+            RAISE EXCEPTION 'এই মাদরাসা কোড (%s) দিয়ে ইতিমধ্যে অন্য একটি মারকাযের কোড বিদ্যমান (অন্য মারকাযের হোস্ট)।', _new_markaz_code
+            USING ERRCODE = '23505'; -- unique_violation for markaz_code
+        END IF;
+    ELSE
+        _new_markaz_code := v_current_markaz.markaz_code; -- Keep the old markaz_code if host isn't changing
+    END IF;
+
+    IF _zone_id <> v_current_markaz.zone_id THEN
+        PERFORM 1 FROM public.zones WHERE id = _zone_id;
+        IF NOT FOUND THEN RAISE EXCEPTION 'নতুন জোন আইডি (%) খুঁজে পাওয়া যায়নি।', _zone_id USING ERRCODE = '23503'; END IF;
+    END IF;
+
+    -- Check for duplicate name_bn (excluding current markaz)
+    PERFORM 1 FROM public.markazes WHERE name_bn = _name_bn AND id <> p_markaz_id;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই নামে (%s) অন্য একটি মারকায ইতিমধ্যে বিদ্যমান।', _name_bn USING ERRCODE = '23505';
+    END IF;
+    
+    -- Check for duplicate host_madrasa_id (excluding current markaz)
+    -- This check is vital if host_madrasa_id itself is being changed.
+    IF _host_madrasa_id <> v_current_markaz.host_madrasa_id THEN
+        PERFORM 1 FROM public.markazes WHERE host_madrasa_id = _host_madrasa_id AND id <> p_markaz_id;
+        IF FOUND THEN
+            DECLARE v_host_madrasa_name_for_error TEXT;
+            BEGIN
+               SELECT name_bn INTO v_host_madrasa_name_for_error FROM public.madrasas WHERE id = _host_madrasa_id;
+                RAISE EXCEPTION 'এই মাদরাসাটি (%s) ইতিমধ্যে অন্য একটি মারকাযের হোস্ট।', v_host_madrasa_name_for_error
+                USING ERRCODE = '23505';
+            END;
+        END IF;
+    END IF;
+
+    UPDATE public.markazes
+    SET
+        markaz_code = _new_markaz_code, -- Set the new markaz_code
+        name_bn = _name_bn,
+        host_madrasa_id = _host_madrasa_id,
+        zone_id = _zone_id,
+        examinee_capacity = _examinee_capacity,
+        is_active = _is_active,
+        updated_at = NOW()
+    WHERE id = p_markaz_id
+    RETURNING * INTO v_updated_markaz;
+
+    RETURN v_updated_markaz;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_markaz(UUID, JSONB) TO authenticated;

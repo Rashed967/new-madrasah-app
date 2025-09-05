@@ -1,0 +1,40 @@
+-- Drop the old, ambiguous function if it exists
+-- This resolves the "could not choose the best candidate function" (300) error from PostgREST
+DROP FUNCTION IF EXISTS public.get_merit_list(p_exam_id UUID, p_marhala_id UUID);
+
+-- Create the new, single function with an optional filter parameter
+CREATE OR REPLACE FUNCTION public.get_merit_list(
+    p_exam_id UUID,
+    p_marhala_id UUID,
+    p_grade_filter TEXT DEFAULT NULL -- Optional filter for grade
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+BEGIN
+    RETURN (
+        SELECT COALESCE(jsonb_agg(
+            jsonb_build_object(
+                'examinee_id', ml.examinee_id,
+                'position_details', ml.position_details,
+                'roll_number', ex.roll_number,
+                'registration_number', ex.registration_number, -- Added registration number
+                'name_bn', ex.name_bn,
+                'madrasa_name_bn', mad.name_bn,
+                'total_marks', ml.total_marks,
+                'percentage', ml.percentage, -- Added percentage
+                'grade', ml.grade
+            ) ORDER BY ml."rank" ASC, ex.roll_number ASC
+        ), '[]'::jsonb)
+        FROM public.merit_lists ml
+        JOIN public.examinees ex ON ml.examinee_id = ex.id
+        JOIN public.madrasas mad ON ex.madrasa_id = mad.id
+        WHERE ml.exam_id = p_exam_id 
+          AND ml.marhala_id = p_marhala_id
+          AND (p_grade_filter IS NULL OR ml.grade = p_grade_filter) -- Apply grade filter if provided
+    );
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_merit_list(UUID, UUID, TEXT) TO authenticated;

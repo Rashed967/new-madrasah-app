@@ -1,0 +1,47 @@
+CREATE OR REPLACE FUNCTION public.get_assignments_by_markaz_and_exam_details(
+    p_markaz_id UUID,
+    p_exam_id UUID
+)
+RETURNS TABLE (
+    assignment_id UUID,
+    markaz_id UUID,
+    exam_id UUID,
+    madrasa_id UUID,
+    marhala_id UUID,
+    assignment_created_at TIMESTAMPTZ,
+    madrasa_name_bn TEXT,
+    madrasa_code INT,
+    marhala_name_bn TEXT,
+    marhala_type TEXT -- boys/girls
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT
+        mma.id AS assignment_id,
+        mma.markaz_id,
+        mma.exam_id,
+        mma.madrasa_id,
+        mma.marhala_id,
+        mma.created_at AS assignment_created_at,
+        mad.name_bn AS madrasa_name_bn,
+        mad.madrasa_code,
+        mar.name_bn AS marhala_name_bn,
+        mar.type AS marhala_type
+    FROM
+        public.markaz_madrasa_marhala_assignments mma
+    JOIN
+        public.madrasas mad ON mma.madrasa_id = mad.id
+    JOIN
+        public.marhalas mar ON mma.marhala_id = mar.id
+    WHERE
+        mma.markaz_id = p_markaz_id AND mma.exam_id = p_exam_id
+    ORDER BY
+        mad.name_bn, mar.marhala_order; -- Sorting by madrasa name, then marhala order
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_assignments_by_markaz_and_exam_details(UUID, UUID) TO authenticated;
+
+-- The old function can be removed or kept for other purposes if needed.
+-- DROP FUNCTION IF EXISTS public.get_assignments_by_markaz_and_exam(UUID, UUID);

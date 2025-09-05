@@ -1,0 +1,50 @@
+
+CREATE OR REPLACE FUNCTION public.create_madrasa_application(
+    p_application_data JSONB -- Expects all fields from the application form
+)
+RETURNS madrasa_applications
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_new_application madrasa_applications%ROWTYPE;
+BEGIN
+    -- This function is intended to be called by anonymous or authenticated users from a public form.
+    -- RLS policies will enforce who can call it.
+
+    -- Extract values and perform validation using camelCase keys to match frontend
+    IF p_application_data->>'nameBn' IS NULL OR TRIM(p_application_data->>'nameBn') = '' THEN RAISE EXCEPTION 'মাদ্রাসার বাংলা নাম আবশ্যক।'; END IF;
+    IF p_application_data->>'nameAr' IS NULL OR TRIM(p_application_data->>'nameAr') = '' THEN RAISE EXCEPTION 'মাদ্রাসার আরবী নাম আবশ্যক।'; END IF;
+    IF p_application_data->>'contactEmail' IS NULL OR TRIM(p_application_data->>'contactEmail') = '' THEN RAISE EXCEPTION 'যোগাযোগের জন্য ইমেইল আবশ্যক।'; END IF;
+    
+    INSERT INTO public.madrasa_applications (
+        name_bn, name_ar, name_en, address, zone_id, mobile1, mobile2, type,
+        highest_marhala_boys_id, highest_marhala_girls_id,
+        muhtamim, education_secretary, mutawalli, registration_date, ilhak_form_url,
+        contact_email, notes, application_status
+    )
+    VALUES (
+        p_application_data->>'nameBn',
+        p_application_data->>'nameAr',
+        p_application_data->>'nameEn',
+        p_application_data->'address',
+        NULLIF(p_application_data->>'zoneId', '')::UUID,
+        p_application_data->>'mobile1',
+        p_application_data->>'mobile2',
+        p_application_data->>'type',
+        NULLIF(p_application_data->>'highestMarhalaBoysId', '')::UUID,
+        NULLIF(p_application_data->>'highestMarhalaGirlsId', '')::UUID,
+        p_application_data->'muhtamim',
+        p_application_data->'educationSecretary',
+        p_application_data->'mutawalli',
+        (p_application_data->>'registrationDate')::DATE,
+        p_application_data->>'ilhakFormUrl',
+        p_application_data->>'contactEmail',
+        p_application_data->>'notes',
+        'pending'
+    )
+    RETURNING * INTO v_new_application;
+
+    RETURN v_new_application;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.create_madrasa_application(JSONB) TO anon, authenticated;

@@ -1,0 +1,96 @@
+
+CREATE OR REPLACE FUNCTION public.get_markaz_attendance_sheet_data(
+    p_exam_id UUID,
+    p_zone_id UUID DEFAULT NULL,
+    p_markaz_id UUID DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+DECLARE
+    v_result JSONB;
+    v_board_profile JSONB;
+    v_exam_name TEXT;
+    v_zone_name TEXT;
+BEGIN
+    SELECT to_jsonb(bp) INTO v_board_profile FROM public.board_profile bp WHERE id = 'MAIN_PROFILE' LIMIT 1;
+    SELECT name INTO v_exam_name FROM public.exams WHERE id = p_exam_id;
+    IF p_zone_id IS NOT NULL THEN
+        SELECT name_bn INTO v_zone_name FROM public.zones WHERE id = p_zone_id;
+    END IF;
+
+    WITH markaz_base AS (
+        SELECT id, markaz_code, host_madrasa_id
+        FROM public.markazes
+        WHERE (p_markaz_id IS NULL OR id = p_markaz_id)
+          AND (p_zone_id IS NULL OR zone_id = p_zone_id)
+          AND is_active = TRUE
+    ),
+    markaz_assignments AS (
+        SELECT
+            mma.markaz_id, mma.madrasa_id, mma.marhala_id, ex.id AS examinee_id, ex.roll_number, mar.category AS marhala_category
+        FROM public.markaz_madrasa_marhala_assignments mma
+        JOIN public.examinees ex ON ex.exam_id = mma.exam_id AND ex.madrasa_id = mma.madrasa_id AND ex.marhala_id = mma.marhala_id
+        JOIN public.marhalas mar ON ex.marhala_id = mar.id
+        WHERE mma.exam_id = p_exam_id
+          AND mma.markaz_id IN (SELECT id FROM markaz_base)
+          AND ex.roll_number IS NOT NULL
+    ),
+    marhala_aggregates AS (
+        SELECT
+            markaz_id, madrasa_id, marhala_id,
+            count(*) as student_count,
+            jsonb_agg(roll_number ORDER BY roll_number) as rolls
+        FROM markaz_assignments
+        GROUP BY markaz_id, madrasa_id, marhala_id
+    ),
+    madrasa_marhala_data AS (
+        SELECT
+            markaz_id, madrasa_id,
+            jsonb_object_agg(marhala_id, jsonb_build_object('count', student_count, 'rolls', rolls)) as marhala_data
+        FROM marhala_aggregates
+        GROUP BY markaz_id, madrasa_id
+    ),
+    madrasa_rows_precalc AS (
+        SELECT
+            mmd.markaz_id,
+            mad.id as madrasa_id,
+            mad.name_bn AS madrasa_name,
+            mad.madrasa_code AS ilhak_no,
+            (SELECT count(*) FROM markaz_assignments ma_count WHERE ma_count.madrasa_id = mad.id AND ma_count.markaz_id = mmd.markaz_id) as total_students_in_madrasa,
+            mmd.marhala_data
+        FROM madrasa_marhala_data mmd
+        JOIN public.madrasas mad ON mmd.madrasa_id = mad.id
+    ),
+    markaz_aggregates AS (
+        SELECT
+            mb.id as markaz_id,
+            mb.markaz_code,
+            mb.host_madrasa_id,
+            COALESCE((SELECT jsonb_agg(mrp ORDER BY mrp.ilhak_no) FROM madrasa_rows_precalc mrp WHERE mrp.markaz_id = mb.id), '[]'::jsonb) as madrasa_rows,
+            (SELECT COALESCE(jsonb_agg(DISTINCT jsonb_build_object('id', mar.id, 'name', mar.name_bn) ORDER BY jsonb_build_object('id', mar.id, 'name', mar.name_bn)), '[]'::jsonb)
+             FROM markaz_assignments ma_mar JOIN public.marhalas mar ON ma_mar.marhala_id = mar.id WHERE ma_mar.markaz_id = mb.id) as all_marhalas_in_markaz,
+            (SELECT COUNT(DISTINCT examinee_id) FROM markaz_assignments WHERE markaz_id = mb.id AND marhala_category = 'darsiyat') AS total_written,
+            (SELECT COUNT(DISTINCT examinee_id) FROM markaz_assignments WHERE markaz_id = mb.id AND marhala_category = 'hifz') AS total_oral
+        FROM markaz_base mb
+    )
+    SELECT jsonb_build_object(
+        'board_profile', v_board_profile,
+        'exam_name', v_exam_name,
+        'zone_name', v_zone_name,
+        'markazes', (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'markaz_id', ma.markaz_id,
+            'markaz_code', ma.markaz_code::TEXT,
+            'host_madrasa_info', hm.name_bn || ', ' || (hm.address->>'upazila') || ', ' || (hm.address->>'district'),
+            'total_written', COALESCE(ma.total_written, 0),
+            'total_oral', COALESCE(ma.total_oral, 0),
+            'madrasa_rows', ma.madrasa_rows,
+            'all_marhalas_in_markaz', ma.all_marhalas_in_markaz
+        ) ORDER BY ma.markaz_code), '[]'::jsonb)
+        FROM markaz_aggregates ma
+        JOIN public.madrasas hm ON ma.host_madrasa_id = hm.id)
+    )
+    INTO v_result;
+
+    RETURN v_result;
+END;
+$$;

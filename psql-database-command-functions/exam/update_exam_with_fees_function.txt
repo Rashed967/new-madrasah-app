@@ -1,0 +1,216 @@
+
+CREATE OR REPLACE FUNCTION public.update_exam_with_fees(
+    p_exam_id UUID,
+    p_exam_details_updates JSONB, -- JSONB object for exam fields to update
+    p_exam_fees_updates JSONB[]   -- Full new array of exam_marhala_fees for this exam
+)
+RETURNS JSONB -- Returns the updated exam's basic info
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_exam_details JSONB;
+    v_current_exam public.exams%ROWTYPE;
+    v_exam_fee_item JSONB;
+    v_new_status TEXT;
+    v_user_role TEXT;
+    v_current_user_id UUID;
+    temp_text TEXT; -- For robust casting checks
+BEGIN
+    RAISE INFO '[update_exam_with_fees_FN_START] Called with p_exam_id: %, p_exam_details_updates: %, p_exam_fees_updates_IS_NULL: %', 
+        p_exam_id, 
+        p_exam_details_updates,
+        (p_exam_fees_updates IS NULL);
+
+    IF p_exam_fees_updates IS NOT NULL THEN
+        RAISE INFO '[update_exam_with_fees_FN_INFO] p_exam_fees_updates (length: %): %', 
+            array_length(p_exam_fees_updates, 1), 
+            p_exam_fees_updates::TEXT; -- Log as text to avoid casting issues
+    END IF;
+
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'পরীক্ষা আপডেট করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    SELECT * INTO v_current_exam FROM public.exams WHERE id = p_exam_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত আইডি (%) সহ কোনো পরীক্ষা পাওয়া যায়নি।', p_exam_id;
+    END IF;
+    RAISE INFO '[update_exam_with_fees_FN_INFO] Current exam status: %', v_current_exam.status;
+
+    -- Handle status update with transition logic first
+    IF p_exam_details_updates ? 'status' THEN
+        v_new_status := p_exam_details_updates->>'status';
+        RAISE INFO '[update_exam_with_fees_FN_INFO] Attempting status change from % to %', v_current_exam.status, v_new_status;
+        IF NOT (v_new_status IN ('pending', 'registration_and_fee_collection_active', 'examinee_entry_active', 'exam_fee_collection_active', 'roll_assignment_active', 'ongoing', 'marks_entry_phase', 'result_processing', 'completed', 'cancelled')) THEN
+            RAISE EXCEPTION 'অবৈধ পরীক্ষার স্ট্যাটাস: %।', v_new_status;
+        END IF;
+
+        -- Check valid status transitions
+        IF v_current_exam.status = 'pending' AND NOT (v_new_status IN ('preparatory', 'cancelled', 'pending')) THEN
+            RAISE EXCEPTION 'প্রক্রিয়াধীন পরীক্ষা শুধুমাত্র "প্রস্তুতি পর্ব" বা "বাতিল" করা যেতে পারে, অথবা "প্রক্রিয়াধীন" থাকতে পারে।';
+        ELSIF v_current_exam.status = 'preparatory' AND NOT (v_new_status IN ('ongoing', 'cancelled', 'preparatory')) THEN
+            RAISE EXCEPTION '"প্রস্তুতি পর্ব" পরীক্ষা শুধুমাত্র "চলমান" বা "বাতিল" করা যেতে পারে, অথবা এই স্ট্যাটাসে থাকতে পারে।';
+        ELSIF v_current_exam.status = 'ongoing' AND NOT (v_new_status IN ('completed', 'cancelled', 'ongoing')) THEN
+            RAISE EXCEPTION 'চলমান পরীক্ষা শুধুমাত্র "সম্পন্ন" বা "বাতিল" করা যেতে পারে, অথবা "চলমান" থাকতে পারে।';
+        ELSIF v_current_exam.status = 'completed' AND v_new_status <> 'completed' AND v_user_role <> 'super_admin' THEN
+            RAISE EXCEPTION 'সম্পন্ন পরীক্ষার স্ট্যাটাস পরিবর্তন করা যাবে না (শুধুমাত্র সুপার অ্যাডমিন বিশেষ প্রয়োজনে পরিবর্তন করতে পারেন)।';
+        ELSIF v_current_exam.status = 'cancelled' AND v_new_status <> 'cancelled' THEN
+            RAISE EXCEPTION 'বাতিল পরীক্ষার স্ট্যাটাস পরিবর্তন করা যাবে না।';
+        END IF;
+        v_current_exam.status := v_new_status; -- Update current_exam.status for checks below
+    END IF;
+    RAISE INFO '[update_exam_with_fees_FN_INFO] Effective status for field checks: %', v_current_exam.status;
+
+    -- Check if exam name is being changed
+    IF v_current_exam.status NOT IN ('pending', 'cancelled') THEN 
+      IF p_exam_details_updates ? 'name' AND (p_exam_details_updates->>'name')::TEXT IS DISTINCT FROM v_current_exam.name THEN
+          RAISE EXCEPTION 'পরীক্ষা "প্রক্রিয়াধীন" বা "বাতিল" না থাকলে পরীক্ষার নাম পরিবর্তন করা যাবে না।';
+      END IF;
+    END IF;
+
+    -- Check if critical fields related to registration are being changed based on the *effective* status
+    IF v_current_exam.status <> 'pending' THEN
+        IF p_exam_details_updates ? 'starting_registration_number' AND (p_exam_details_updates->>'starting_registration_number')::INTEGER IS DISTINCT FROM v_current_exam.starting_registration_number THEN
+            RAISE EXCEPTION 'পরীক্ষা "প্রক্রিয়াধীন" না থাকলে নিবন্ধন শুরুর নম্বর পরিবর্তন করা যাবে না।';
+        END IF;
+        IF p_exam_details_updates ? 'registration_deadline' AND (p_exam_details_updates->>'registration_deadline')::TIMESTAMPTZ IS DISTINCT FROM v_current_exam.registration_deadline THEN
+            RAISE EXCEPTION 'পরীক্ষা "প্রক্রিয়াধীন" না থাকলে নিবন্ধনের শেষ তারিখ পরিবর্তন করা যাবে না।';
+        END IF;
+        IF p_exam_details_updates ? 'registration_fee_regular' OR
+           p_exam_details_updates ? 'registration_fee_irregular' OR
+           p_exam_details_updates ? 'late_registration_fee_regular' OR
+           p_exam_details_updates ? 'late_registration_fee_irregular' THEN
+             IF (p_exam_details_updates->>'registration_fee_regular')::INTEGER IS DISTINCT FROM v_current_exam.registration_fee_regular OR
+                (p_exam_details_updates->>'registration_fee_irregular')::INTEGER IS DISTINCT FROM v_current_exam.registration_fee_irregular OR
+                (p_exam_details_updates->>'late_registration_fee_regular')::INTEGER IS DISTINCT FROM v_current_exam.late_registration_fee_regular OR
+                (p_exam_details_updates->>'late_registration_fee_irregular')::INTEGER IS DISTINCT FROM v_current_exam.late_registration_fee_irregular THEN
+                 RAISE EXCEPTION 'পরীক্ষা "প্রক্রিয়াধীন" না থাকলে সাধারণ নিবন্ধন ফি বা বিলম্ব ফি পরিবর্তন করা যাবে না।';
+             END IF;
+        END IF;
+    END IF;
+
+    -- Check if marhala-specific fees (exam_marhala_fees) are being changed
+    IF v_current_exam.status <> 'pending' THEN
+        IF p_exam_fees_updates IS NOT NULL AND array_length(p_exam_fees_updates, 1) > 0 THEN
+            RAISE INFO '[update_exam_with_fees_FN_WARN] Attempt to update marhala fees when status is %, p_exam_fees_updates count: %', v_current_exam.status, array_length(p_exam_fees_updates, 1);
+            RAISE EXCEPTION 'পরীক্ষা "প্রক্রিয়াধীন" না থাকলে মারহালা ভিত্তিক পরীক্ষার ফি (যেমন শুরুর রোল নম্বর, পরীক্ষার ফি) পরিবর্তন করা যাবে না।';
+        END IF;
+    END IF;
+
+    RAISE INFO '[update_exam_with_fees_FN_INFO] Proceeding to update exams table. Details to update: %', p_exam_details_updates;
+    -- Update exams table
+    UPDATE public.exams
+    SET
+        name = COALESCE(p_exam_details_updates->>'name', name),
+        registration_deadline = COALESCE((p_exam_details_updates->>'registration_deadline')::TIMESTAMPTZ, registration_deadline),
+        starting_registration_number = COALESCE((p_exam_details_updates->>'starting_registration_number')::INTEGER, starting_registration_number),
+        registration_fee_regular = COALESCE((p_exam_details_updates->>'registration_fee_regular')::INTEGER, registration_fee_regular),
+        registration_fee_irregular = COALESCE((p_exam_details_updates->>'registration_fee_irregular')::INTEGER, registration_fee_irregular),
+        late_registration_fee_regular = COALESCE((p_exam_details_updates->>'late_registration_fee_regular')::INTEGER, late_registration_fee_regular),
+        late_registration_fee_irregular = COALESCE((p_exam_details_updates->>'late_registration_fee_irregular')::INTEGER, late_registration_fee_irregular),
+        is_active = COALESCE((p_exam_details_updates->>'is_active')::BOOLEAN, is_active),
+        status = v_current_exam.status, -- Use the validated status
+        updated_at = NOW()
+    WHERE id = p_exam_id
+    RETURNING to_jsonb(exams.*) INTO v_updated_exam_details;
+
+    RAISE INFO '[update_exam_with_fees_FN_INFO] Exams table updated. Updated exam details: %', v_updated_exam_details;
+
+    -- Update exam_marhala_fees table ONLY if status is 'pending'
+    IF v_current_exam.status = 'pending' AND p_exam_fees_updates IS NOT NULL THEN
+        RAISE INFO '[update_exam_with_fees_FN_INFO] Status is pending. Deleting existing exam_marhala_fees for exam_id: %', p_exam_id;
+        DELETE FROM public.exam_marhala_fees WHERE exam_id = p_exam_id;
+        
+        IF array_length(p_exam_fees_updates, 1) > 0 THEN
+            RAISE INFO '[update_exam_with_fees_FN_INFO] Inserting new exam_marhala_fees. Count: %', array_length(p_exam_fees_updates, 1);
+            FOREACH v_exam_fee_item IN ARRAY p_exam_fees_updates
+            LOOP
+                RAISE INFO '[update_exam_with_fees_FN_INFO] Processing fee item for marhalaId: %', v_exam_fee_item->>'marhalaId';
+                 -- Robust casting for fee item fields
+                DECLARE
+                    _marhala_id UUID;
+                    _starting_roll_number INTEGER;
+                    _regular_fee INTEGER;
+                    _irregular_fee INTEGER;
+                    _late_regular_fee_marhala INTEGER;
+                    _late_irregular_fee_marhala INTEGER;
+                BEGIN
+                    temp_text := v_exam_fee_item->>'marhalaId';
+                    IF temp_text IS NULL THEN RAISE EXCEPTION 'মারহালা ফি এর জন্য মারহালা আইডি আবশ্যক।'; END IF;
+                    _marhala_id := temp_text::UUID;
+
+                    temp_text := v_exam_fee_item->>'startingRollNumber';
+                    IF temp_text IS NULL THEN RAISE EXCEPTION 'মারহালা (%s) এর শুরুর রোল নম্বর আবশ্যক।', _marhala_id; END IF;
+                    _starting_roll_number := temp_text::INTEGER;
+                    IF _starting_roll_number <=0 THEN RAISE EXCEPTION 'মারহালা (%s) এর শুরুর রোল নম্বর ধনাত্মক হতে হবে।', _marhala_id; END IF;
+                    
+                    temp_text := v_exam_fee_item->>'regularFee';
+                    IF temp_text IS NULL THEN RAISE EXCEPTION 'মারহাala (%s) এর পরীক্ষার ফি (নিয়মিত) আবশ্যক।', _marhala_id; END IF;
+                    _regular_fee := temp_text::INTEGER;
+                     IF _regular_fee < 0 THEN RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার ফি (নিয়মিত) অঋণাত্মক হতে হবে।', _marhala_id; END IF;
+
+                    temp_text := v_exam_fee_item->>'irregularFee';
+                     IF temp_text IS NULL THEN RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার ফি (অনিয়মিত) আবশ্যক।', _marhala_id; END IF;
+                    _irregular_fee := temp_text::INTEGER;
+                    IF _irregular_fee < 0 THEN RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার ফি (অনিয়মিত) অঋণাত্মক হতে হবে।', _marhala_id; END IF;
+                    
+                    temp_text := v_exam_fee_item->>'lateRegularFee';
+                    IF temp_text IS NULL THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (নিয়মিত) আবশ্যক।', _marhala_id; END IF;
+                    _late_regular_fee_marhala := temp_text::INTEGER;
+                     IF _late_regular_fee_marhala < 0 THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (নিয়মিত) অঋণাত্মক হতে হবে।', _marhala_id; END IF;
+
+                    temp_text := v_exam_fee_item->>'lateIrregularFee';
+                    IF temp_text IS NULL THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (অনিয়মিত) আবশ্যক।', _marhala_id; END IF;
+                    _late_irregular_fee_marhala := temp_text::INTEGER;
+                    IF _late_irregular_fee_marhala < 0 THEN RAISE EXCEPTION 'মারহালা (%s) এর বিলম্ব ফি (অনিয়মিত) অঋণাত্মক হতে হবে।', _marhala_id; END IF;
+
+
+                    INSERT INTO public.exam_marhala_fees (
+                        exam_id, marhala_id, starting_roll_number, regular_fee, irregular_fee,
+                        late_regular_fee, late_irregular_fee, created_at, updated_at
+                    )
+                    VALUES (
+                        p_exam_id,
+                        _marhala_id, 
+                        _starting_roll_number,
+                        _regular_fee,
+                        _irregular_fee,
+                        _late_regular_fee_marhala,
+                        _late_irregular_fee_marhala,
+                        NOW(), NOW()
+                    );
+                EXCEPTION
+                    WHEN invalid_text_representation THEN
+                        RAISE INFO '[update_exam_with_fees_FN_ERROR] Invalid text representation for fee item: %, SQLSTATE: %, SQLERRM: %', v_exam_fee_item, SQLSTATE, SQLERRM;
+                        RAISE EXCEPTION 'মারহালা ফি আইটেমের ডেটা (%s) সঠিক ফরম্যাটে নেই।', v_exam_fee_item->>'marhalaId';
+                    WHEN foreign_key_violation THEN
+                        RAISE INFO '[update_exam_with_fees_FN_ERROR] Foreign key violation for marhalaId: %, SQLSTATE: %, SQLERRM: %', v_exam_fee_item->>'marhalaId', SQLSTATE, SQLERRM;
+                        RAISE EXCEPTION 'প্রদত্ত মারহালা আইডি (%s) মারহালা টেবিলে পাওয়া যায়নি।', v_exam_fee_item->>'marhalaId';
+                END;
+            END LOOP;
+        END IF;
+    ELSIF p_exam_fees_updates IS NOT NULL AND array_length(p_exam_fees_updates, 1) > 0 THEN
+         RAISE INFO '[update_exam_with_fees_FN_WARN] Marhala fees were provided but not updated due to exam status: %', v_current_exam.status;
+    END IF;
+    RAISE INFO '[update_exam_with_fees_FN_END] Function completed. Returning: %', v_updated_exam_details;
+    RETURN v_updated_exam_details;
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE INFO '[update_exam_with_fees_FN_ERROR] Unique violation: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        IF SQLERRM LIKE '%exams_name_key%' THEN
+            RAISE EXCEPTION 'এই নামে একটি পরীক্ষা ইতিমধ্যে বিদ্যমান: "%"', p_exam_details_updates->>'name'
+            USING ERRCODE = '23505';
+        ELSE
+            RAISE; 
+        END IF;
+    WHEN others THEN
+        RAISE INFO '[update_exam_with_fees_FN_ERROR] Other error: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE; 
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_exam_with_fees(UUID, JSONB, JSONB[]) TO authenticated;

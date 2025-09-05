@@ -1,0 +1,71 @@
+
+CREATE OR REPLACE FUNCTION public.get_eligible_examinees_for_exam_fee(
+    p_exam_id UUID,
+    p_madrasa_id UUID,
+    p_apply_late_fee BOOLEAN
+)
+RETURNS JSONB -- Returns { examinees: [{id, nameBn, ...}], totalEligible: number }
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    _examinees_data JSONB;
+    _total_eligible INTEGER;
+BEGIN
+    -- Construct the JSON array of examinees
+    WITH eligible_examinees_cte AS (
+        SELECT
+            ex.id,
+            ex.name_bn,
+            ex.registration_number,
+            ex.marhala_id,
+            mar.name_bn AS marhala_name_bn,
+            mar.type AS marhala_type,
+            ex.student_type,
+            CASE
+                WHEN p_apply_late_fee THEN
+                    CASE
+                        WHEN ex.student_type = 'regular' THEN emf.late_regular_fee
+                        ELSE emf.late_irregular_fee
+                    END
+                ELSE
+                    CASE
+                        WHEN ex.student_type = 'regular' THEN emf.regular_fee
+                        ELSE emf.irregular_fee
+                    END
+            END AS applicable_fee,
+            mar.marhala_order -- Include for ordering
+        FROM public.examinees ex
+        JOIN public.marhalas mar ON ex.marhala_id = mar.id
+        JOIN public.exam_marhala_fees emf ON ex.exam_id = emf.exam_id AND ex.marhala_id = emf.marhala_id
+        WHERE ex.exam_id = p_exam_id
+          AND ex.madrasa_id = p_madrasa_id
+          AND ex.status = 'fee_pending' -- Crucial filter
+    )
+    SELECT COALESCE(jsonb_agg(cte_data ORDER BY cte_data.marhala_order ASC NULLS LAST, cte_data.registration_number ASC NULLS LAST), '[]'::jsonb)
+    INTO _examinees_data
+    FROM eligible_examinees_cte cte_data;
+
+    -- Count the total eligible examinees directly from the base tables
+    -- This avoids referencing the CTE twice, which might be causing planner issues.
+    SELECT COUNT(*)
+    INTO _total_eligible
+    FROM public.examinees ex
+    -- Joins are kept here if they were part of a filter criteria for the count.
+    -- If marhala_order or applicable_fee were part of the WHERE for the count, these joins are needed.
+    -- In this specific case, they are not strictly needed for the count based on current filters,
+    -- but keeping them consistent with the CTE's FROM clause doesn't hurt unless performance is an issue.
+    JOIN public.marhalas mar ON ex.marhala_id = mar.id 
+    JOIN public.exam_marhala_fees emf ON ex.exam_id = emf.exam_id AND ex.marhala_id = emf.marhala_id
+    WHERE ex.exam_id = p_exam_id
+      AND ex.madrasa_id = p_madrasa_id
+      AND ex.status = 'fee_pending';
+
+    RETURN jsonb_build_object(
+        'examinees', _examinees_data,
+        'totalEligible', _total_eligible
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_eligible_examinees_for_exam_fee(UUID, UUID, BOOLEAN) TO authenticated;

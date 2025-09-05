@@ -1,0 +1,49 @@
+
+CREATE OR REPLACE FUNCTION public.create_bank_account(
+    p_bank_name TEXT,
+    p_branch_name TEXT,
+    p_account_name TEXT,
+    p_account_number TEXT,
+    p_account_type TEXT,
+    p_opening_date DATE,
+    p_opening_balance NUMERIC
+)
+RETURNS bank_accounts
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_account bank_accounts%ROWTYPE;
+    v_user_role TEXT;
+BEGIN
+    -- Authorization check
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = auth.uid();
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'অ্যাকাউন্ট তৈরির অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Validations
+    IF p_bank_name IS NULL OR TRIM(p_bank_name) = '' THEN RAISE EXCEPTION 'ব্যাংকের নাম আবশ্যক।'; END IF;
+    IF p_account_number IS NULL OR TRIM(p_account_number) = '' THEN RAISE EXCEPTION 'অ্যাকাউন্ট নম্বর আবশ্যক।'; END IF;
+    IF p_opening_balance IS NULL OR p_opening_balance < 0 THEN RAISE EXCEPTION 'প্রারম্ভিক ব্যালেন্স ঋণাত্মক হতে পারবে না।'; END IF;
+    
+    -- Check for duplicate account number
+    PERFORM 1 FROM public.bank_accounts WHERE account_number = p_account_number;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই অ্যাকাউন্ট নম্বরটি (%s) ইতিমধ্যে যোগ করা হয়েছে।', p_account_number USING ERRCODE = '23505';
+    END IF;
+
+    INSERT INTO public.bank_accounts (
+        bank_name, branch_name, account_name, account_number, account_type,
+        opening_date, opening_balance, current_balance, is_active
+    ) VALUES (
+        p_bank_name, p_branch_name, p_account_name, p_account_number, p_account_type,
+        p_opening_date, p_opening_balance, p_opening_balance, -- current_balance starts as opening_balance
+        TRUE
+    ) RETURNING * INTO v_new_account;
+
+    RETURN v_new_account;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_bank_account(TEXT, TEXT, TEXT, TEXT, TEXT, DATE, NUMERIC) TO authenticated;

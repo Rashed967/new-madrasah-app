@@ -1,0 +1,38 @@
+
+-- This table stores information about the board of directors or other key officials.
+CREATE TABLE IF NOT EXISTS public.officials (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    designation TEXT NOT NULL,
+    image_url TEXT,
+    order_index INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+COMMENT ON TABLE public.officials IS 'Stores information about board members and key officials.';
+COMMENT ON COLUMN public.officials.order_index IS 'Used to manually order the officials on public-facing pages.';
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_officials_order_index ON public.officials(order_index);
+CREATE INDEX IF NOT EXISTS idx_officials_is_active ON public.officials(is_active);
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_officials_updated ON public.officials;
+CREATE TRIGGER on_officials_updated
+BEFORE UPDATE ON public.officials
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at(); -- Assumes handle_updated_at function exists
+
+-- RLS Policies
+ALTER TABLE public.officials ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow public read access for active officials"
+ON public.officials FOR SELECT TO anon, authenticated
+USING (is_active = TRUE);
+
+CREATE POLICY "Allow admin full access for officials"
+ON public.officials FOR ALL TO authenticated
+USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

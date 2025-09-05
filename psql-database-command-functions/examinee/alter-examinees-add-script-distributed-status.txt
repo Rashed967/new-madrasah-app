@@ -1,0 +1,24 @@
+
+-- This script safely updates the 'examinees_status_check' constraint
+-- to include the new 'script_distributed' status for an existing database.
+-- Run this in your Supabase SQL Editor.
+
+-- Step 1: Drop the existing constraint. 
+-- It's safe to drop because we will immediately add a new, updated one.
+-- The name 'examinees_status_check' is assumed from Supabase defaults. 
+-- If your constraint has a different name, replace it here.
+ALTER TABLE public.examinees
+DROP CONSTRAINT IF EXISTS examinees_status_check;
+
+-- Step 2: Add the new constraint with the updated list of valid statuses.
+ALTER TABLE public.examinees
+ADD CONSTRAINT examinees_status_check CHECK (status IN (
+    'fee_pending', 
+    'fee_paid',
+    'roll_assigned', 
+    'script_distributed', 
+    'ongoing',
+    'correction_requested',
+    'absent',
+    'expelled'
+));

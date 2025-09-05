@@ -1,0 +1,72 @@
+
+CREATE OR REPLACE FUNCTION public.get_teachers_list( -- Renamed from get_registered_personnel_list
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10,
+    p_search_term TEXT DEFAULT NULL,
+    p_is_active BOOLEAN DEFAULT NULL,
+    p_sort_field TEXT DEFAULT 'created_at',
+    p_sort_order TEXT DEFAULT 'desc'
+)
+RETURNS JSONB 
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    _query TEXT;
+    _count_query TEXT;
+    _offset INTEGER;
+    _total_items INTEGER;
+    _items_jsonb JSONB;
+    _where_clauses TEXT[] := ARRAY['TRUE'];
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    IF p_search_term IS NOT NULL AND p_search_term <> '' THEN
+        _where_clauses := array_append(_where_clauses, 
+            format(
+                '(t.name_bn ILIKE %1$L OR t.mobile ILIKE %1$L OR t.teacher_code ILIKE %1$L OR t.email ILIKE %1$L OR t.nid_number ILIKE %1$L)', 
+                '%' || p_search_term || '%'
+            )
+        );
+    END IF;
+
+    IF p_is_active IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('t.is_active = %L', p_is_active)); 
+    END IF;
+    
+    _query := '
+        SELECT 
+            t.id, t.teacher_code, t.name_bn, t.name_en, t.mobile, t.nid_number, t.email,
+            t.date_of_birth, t.gender, t.photo_url, t.payment_info, -- Added missing columns
+            t.address_details, 
+            t.educational_qualification, t.kitabi_qualification, t.expertise_areas,
+            t.notes, t.is_active, t.registered_by, t.created_at, t.updated_at
+        FROM public.teachers t 
+        WHERE ' || array_to_string(_where_clauses, ' AND ');
+
+    _count_query := '
+        SELECT COUNT(t.id) 
+        FROM public.teachers t 
+        WHERE ' || array_to_string(_where_clauses, ' AND ');
+    
+    EXECUTE _count_query INTO _total_items;
+
+    IF p_sort_field IS NOT NULL AND (lower(p_sort_order) = 'asc' OR lower(p_sort_order) = 'desc') THEN
+        IF p_sort_field IN ('teacher_code', 'name_bn', 'mobile', 'is_active', 'created_at', 'date_of_birth', 'gender') THEN 
+             _query := _query || format(' ORDER BY t.%I %s', p_sort_field, p_sort_order); 
+        ELSE
+            _query := _query || ' ORDER BY t.created_at DESC'; 
+        END IF;
+    ELSE
+        _query := _query || ' ORDER BY t.created_at DESC'; 
+    END IF;
+
+    _query := _query || format(' LIMIT %L OFFSET %L', p_limit, _offset);
+    
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _query || ') q' INTO _items_jsonb;
+    
+    RETURN jsonb_build_object('items', _items_jsonb, 'totalItems', _total_items);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_teachers_list(INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT) TO authenticated;

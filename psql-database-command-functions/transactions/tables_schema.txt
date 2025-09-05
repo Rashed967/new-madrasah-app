@@ -1,0 +1,82 @@
+-- ===================================================================
+-- Table: transaction_categories
+-- Purpose: Stores categories for income and expense transactions.
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS public.transaction_categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+COMMENT ON TABLE public.transaction_categories IS 'Stores categories for income and expense transactions, like "Office Rent" or "Exam Fees".';
+
+-- RLS for transaction_categories
+ALTER TABLE public.transaction_categories ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow read access to all authenticated users for transaction_categories"
+  ON public.transaction_categories FOR SELECT TO authenticated USING (true);
+CREATE POLICY "Allow admin full access for transaction_categories"
+  ON public.transaction_categories FOR ALL TO authenticated
+  USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+  WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+
+-- ===================================================================
+-- Table: transactions
+-- Purpose: Stores all income and expense transaction records.
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS public.transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_date DATE NOT NULL,
+    category_id UUID NOT NULL REFERENCES public.transaction_categories(id) ON DELETE RESTRICT,
+    amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+    type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
+    party_name TEXT, -- From whom (income) or To whom (expense)
+    voucher_no TEXT,
+    description TEXT,
+    created_by UUID REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+COMMENT ON TABLE public.transactions IS 'Logs every financial transaction, both income and expense.';
+COMMENT ON COLUMN public.transactions.party_name IS 'Name of the person/organization from whom money was received (income) or to whom it was paid (expense).';
+
+-- Indexes for transactions table
+CREATE INDEX IF NOT EXISTS idx_transactions_transaction_date ON public.transactions(transaction_date);
+CREATE INDEX IF NOT EXISTS idx_transactions_category_id ON public.transactions(category_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_type ON public.transactions(type);
+
+-- Trigger for updated_at on transactions
+DROP TRIGGER IF EXISTS on_transactions_updated ON public.transactions;
+CREATE TRIGGER on_transactions_updated
+BEFORE UPDATE ON public.transactions
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at(); -- Assumes handle_updated_at function exists
+
+-- RLS for transactions
+ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow admin full access for transactions"
+  ON public.transactions FOR ALL TO authenticated
+  USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+  WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+
+-- ===================================================================
+-- Initial Seed Data for transaction_categories
+-- ===================================================================
+INSERT INTO public.transaction_categories (name, type) VALUES
+    ('পরীক্ষার ফি', 'income'),
+    ('নিবন্ধন ফি', 'income'),
+    ('অনুদান', 'income'),
+    ('সনদ ফি', 'income'),
+    ('অন্যান্য আয়', 'income'),
+    ('কর্মকর্তাদের বেতন', 'expense'),
+    ('অফিস ভাড়া', 'expense'),
+    ('আপ্যায়ন', 'expense'),
+    ('বিদ্যুৎ বিল', 'expense'),
+    ('ইন্টারনেট বিল', 'expense'),
+    ('পরিবহন খরচ', 'expense'),
+    ('স্টেশনারি ক্রয়', 'expense'),
+    ('অন্যান্য ব্যয়', 'expense')
+ON CONFLICT (name) DO NOTHING;

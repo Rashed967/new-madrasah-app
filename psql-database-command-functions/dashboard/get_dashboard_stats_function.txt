@@ -1,0 +1,55 @@
+-- ===================================================================
+-- RPC Function: get_dashboard_stats
+-- Purpose: Fetch key statistics for the admin dashboard.
+-- ===================================================================
+CREATE OR REPLACE FUNCTION public.get_dashboard_stats()
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_total_madrasas INTEGER;
+    v_boys_madrasas INTEGER;
+    v_girls_madrasas INTEGER;
+    v_total_markazes INTEGER;
+    v_total_examinees_current_year INTEGER;
+    v_total_teachers INTEGER; -- Changed from v_total_mumtahins
+    v_active_exam_id UUID;
+BEGIN
+    -- Madrasa counts
+    SELECT COUNT(*) INTO v_total_madrasas FROM public.madrasas;
+    SELECT COUNT(*) INTO v_boys_madrasas FROM public.madrasas WHERE type IN ('boys', 'both');
+    SELECT COUNT(*) INTO v_girls_madrasas FROM public.madrasas WHERE type IN ('girls', 'both');
+
+    -- Markaz count (active only)
+    SELECT COUNT(*) INTO v_total_markazes FROM public.markazes WHERE is_active = TRUE;
+
+    -- Total teachers count
+    SELECT COUNT(*) INTO v_total_teachers FROM public.teachers;
+
+    -- Find the most recent active exam that is not pending or cancelled
+    SELECT id INTO v_active_exam_id 
+    FROM public.exams 
+    WHERE is_active = true AND status <> 'pending' AND status <> 'cancelled'
+    ORDER BY created_at DESC 
+    LIMIT 1;
+
+    -- Get total examinees for that exam
+    IF v_active_exam_id IS NOT NULL THEN
+        SELECT COUNT(*) INTO v_total_examinees_current_year FROM public.examinees WHERE exam_id = v_active_exam_id;
+    ELSE
+        v_total_examinees_current_year := 0;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'total_madrasas', COALESCE(v_total_madrasas, 0),
+        'boys_madrasas', COALESCE(v_boys_madrasas, 0),
+        'girls_madrasas', COALESCE(v_girls_madrasas, 0),
+        'total_markazes', COALESCE(v_total_markazes, 0),
+        'total_examinees_current_year', COALESCE(v_total_examinees_current_year, 0),
+        'total_teachers', COALESCE(v_total_teachers, 0) -- Changed from total_mumtahins
+    );
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_dashboard_stats() TO authenticated;

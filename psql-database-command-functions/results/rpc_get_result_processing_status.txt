@@ -1,0 +1,50 @@
+CREATE OR REPLACE FUNCTION public.get_result_processing_status(p_exam_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    result JSONB;
+BEGIN
+    WITH marhalas_in_exam AS (
+        SELECT DISTINCT marhala_id
+        FROM public.exam_marhala_fees
+        WHERE exam_id = p_exam_id
+    ),
+    marhala_stats AS (
+        SELECT
+            m.id as marhala_id,
+            m.name_bn as marhala_name,
+            (SELECT COUNT(*) FROM public.examinees ex WHERE ex.exam_id = p_exam_id AND ex.marhala_id = m.id AND ex.status <> 'cancelled') as examinee_count,
+            COALESCE(array_length(m.kitab_ids, 1), 0) as kitab_count
+        FROM public.marhalas m
+        WHERE m.id IN (SELECT marhala_id FROM marhalas_in_exam)
+    ),
+    marks_stats AS (
+        SELECT
+            ex.marhala_id,
+            COUNT(m.id) as actual_marks_entries
+        FROM public.marks m
+        JOIN public.examinees ex ON m.examinee_id = ex.id
+        WHERE m.exam_id = p_exam_id
+        GROUP BY ex.marhala_id
+    )
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'marhala_id', ms.marhala_id,
+            'marhala_name', ms.marhala_name,
+            'expected_marks_entries', ms.examinee_count * ms.kitab_count,
+            'actual_marks_entries', COALESCE(marks.actual_marks_entries, 0),
+            'is_complete', (ms.examinee_count * ms.kitab_count) = COALESCE(marks.actual_marks_entries, 0)
+        ) ORDER BY ms.marhala_name
+    ), '[]'::jsonb)
+    INTO result
+    FROM marhala_stats ms
+    LEFT JOIN marks_stats marks ON ms.marhala_id = marks.marhala_id;
+
+    RETURN result;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_result_processing_status(UUID) TO authenticated;

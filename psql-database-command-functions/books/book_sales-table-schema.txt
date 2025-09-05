@@ -1,0 +1,25 @@
+
+CREATE TABLE IF NOT EXISTS public.book_sales (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    book_id UUID NOT NULL REFERENCES public.books(id) ON DELETE RESTRICT,
+    quantity_sold INTEGER NOT NULL CHECK (quantity_sold > 0),
+    price_per_unit NUMERIC(10, 2) NOT NULL CHECK (price_per_unit >= 0),
+    total_amount NUMERIC(12, 2) NOT NULL,
+    sale_date TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    customer_name TEXT,
+    notes TEXT,
+    created_by UUID REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+COMMENT ON TABLE public.book_sales IS 'Records each book sale transaction.';
+COMMENT ON COLUMN public.book_sales.price_per_unit IS 'The price of the book at the time of sale.';
+
+-- RLS Policies
+ALTER TABLE public.book_sales ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow admin full access for book_sales"
+  ON public.book_sales
+  FOR ALL TO authenticated
+  USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+  WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

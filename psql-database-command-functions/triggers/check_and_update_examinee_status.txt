@@ -1,0 +1,46 @@
+-- This function is called by a trigger on the 'marks' table
+-- after an insert or update. It checks if all required marks for a specific
+-- examinee in a specific exam have been entered. If so, it updates the
+-- examinee's status to 'Completed'.
+
+CREATE OR REPLACE FUNCTION check_and_update_examinee_status(p_examinee_id UUID, p_exam_id UUID)
+RETURNS VOID AS $$
+DECLARE
+    v_total_kitabs_for_marhala INT;
+    v_entered_marks_for_examinee INT;
+    v_examinee_marhala_id UUID;
+BEGIN
+    -- Get the marhala_id for the given examinee
+    SELECT marhala_id INTO v_examinee_marhala_id
+    FROM public.examinees
+    WHERE id = p_examinee_id;
+
+    IF v_examinee_marhala_id IS NULL THEN
+        RAISE WARNING 'Examinee with ID % not found.', p_examinee_id;
+        RETURN;
+    END IF;
+
+    -- Get the total number of kitabs for the examinee's marhala from the marhalas table
+    SELECT COALESCE(array_length(kitab_ids, 1), 0)
+    INTO v_total_kitabs_for_marhala
+    FROM public.marhalas
+    WHERE id = v_examinee_marhala_id;
+
+    -- Get the count of marks entered for the examinee in the given exam
+    SELECT COUNT(*)
+    INTO v_entered_marks_for_examinee
+    FROM public.marks
+    WHERE examinee_id = p_examinee_id AND exam_id = p_exam_id;
+
+    -- If all marks are entered, update the examinee's status to 'Completed'
+    IF v_total_kitabs_for_marhala > 0 AND v_total_kitabs_for_marhala = v_entered_marks_for_examinee THEN
+        UPDATE public.examinees
+        SET status = 'Completed'
+        WHERE id = p_examinee_id
+          AND exam_id = p_exam_id
+          -- Only update if the current status is one that precedes completion
+          AND status IN ('roll_assigned', 'script_distributed');
+    END IF;
+
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;

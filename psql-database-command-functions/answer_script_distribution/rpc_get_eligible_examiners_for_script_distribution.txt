@@ -1,0 +1,62 @@
+
+CREATE OR REPLACE FUNCTION public.get_eligible_examiners_for_script_distribution(
+    p_exam_id UUID,
+    p_search_term TEXT DEFAULT NULL,
+    p_limit INTEGER DEFAULT 10,
+    p_page INTEGER DEFAULT 1
+)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+DECLARE
+    _offset INTEGER;
+    _items JSONB;
+    _total_items INTEGER;
+    _query_main TEXT;
+    _query_count TEXT;
+    _where_clauses TEXT[] := ARRAY['t.is_active = TRUE']; -- Initialized with a base condition
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    -- Ensure p_exam_id is handled correctly
+    IF p_exam_id IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('epa.exam_id = %L', p_exam_id));
+    ELSE
+        -- If p_exam_id is NULL, no examiners can be eligible for a non-specified exam.
+        -- Adding 'FALSE' ensures the query correctly returns no results.
+        _where_clauses := array_append(_where_clauses, 'FALSE'); 
+    END IF;
+    
+    _where_clauses := array_append(_where_clauses, 'epa.assigned_role = ''mumtahin''');
+
+    IF p_search_term IS NOT NULL AND TRIM(p_search_term) <> '' THEN
+        _where_clauses := array_append(_where_clauses, format(
+            '(t.name_bn ILIKE %1$L OR t.teacher_code ILIKE %1$L OR t.mobile ILIKE %1$L OR t.nid_number ILIKE %1$L)',
+            '%' || TRIM(p_search_term) || '%'
+        ));
+    END IF;
+
+    _query_count := '
+        SELECT COUNT(DISTINCT t.id)
+        FROM public.teachers t
+        JOIN public.exam_personnel_assignments epa ON t.id = epa.personnel_id
+        WHERE ' || array_to_string(_where_clauses, ' AND ');
+
+    EXECUTE _query_count INTO _total_items;
+
+    _query_main := '
+        SELECT jsonb_agg(jsonb_build_object(''value'', sub.id, ''label'', sub.name_bn || '' ('' || sub.teacher_code || '')'', ''code'', sub.teacher_code))
+        FROM (
+            SELECT DISTINCT t.id, t.name_bn, t.teacher_code
+            FROM public.teachers t
+            JOIN public.exam_personnel_assignments epa ON t.id = epa.personnel_id
+            WHERE ' || array_to_string(_where_clauses, ' AND ') || '
+            ORDER BY t.name_bn
+            LIMIT ' || p_limit || ' OFFSET ' || _offset || '
+        ) AS sub';
+
+    EXECUTE _query_main INTO _items;
+
+    RETURN jsonb_build_object('items', COALESCE(_items, '[]'::jsonb), 'total_items', _total_items);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_eligible_examiners_for_script_distribution(UUID, TEXT, INTEGER, INTEGER) TO authenticated;

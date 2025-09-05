@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS public.registration_fee_payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    registration_fee_collection_id UUID NOT NULL REFERENCES public.registration_fee_collections(id) ON DELETE CASCADE,
+    method TEXT NOT NULL CHECK (method IN ('cash', 'check', 'mobile_banking', 'bank_transfer')),
+    amount NUMERIC(10, 2) NOT NULL CHECK (amount > 0),
+    payment_date DATE NOT NULL,
+    transaction_id TEXT,
+    bank_name TEXT,
+    branch_name TEXT,
+    account_number TEXT,
+    check_number TEXT,
+    mobile_banking_provider TEXT,
+    sender_number TEXT,
+    receiver_number TEXT,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+    -- No updated_at typically needed for payment line items unless they are editable after creation.
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_rfp_collection_id ON public.registration_fee_payments(registration_fee_collection_id);
+CREATE INDEX IF NOT EXISTS idx_rfp_method ON public.registration_fee_payments(method);

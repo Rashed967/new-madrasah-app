@@ -1,0 +1,110 @@
+
+CREATE OR REPLACE FUNCTION public.get_examinees_list_with_details(
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10,
+    p_search_term TEXT DEFAULT NULL,
+    p_exam_id_filter UUID DEFAULT NULL,
+    p_madrasa_id_filter UUID DEFAULT NULL,
+    p_marhala_id_filter UUID DEFAULT NULL,
+    p_status_filter TEXT DEFAULT NULL,
+    p_reg_no_start_filter INTEGER DEFAULT NULL,
+    p_reg_no_end_filter INTEGER DEFAULT NULL,
+    p_sort_field TEXT DEFAULT 'registration_input_date', -- Default sort field
+    p_sort_order TEXT DEFAULT 'desc' -- Default sort order
+)
+RETURNS JSONB -- Returns { items: ExamineeWithNames[], totalItems: number }
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    _query TEXT;
+    _count_query TEXT;
+    _offset INTEGER;
+    _total_items INTEGER;
+    _items_jsonb JSONB;
+    _where_clauses TEXT[] := ARRAY['TRUE']; -- Initialize with TRUE to easily append AND clauses
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    -- Search term filter (name_bn or registration_number)
+    IF p_search_term IS NOT NULL AND p_search_term <> '' THEN
+        _where_clauses := array_append(_where_clauses, 
+            format('(ex.name_bn ILIKE %1$L OR ex.registration_number::TEXT ILIKE %1$L)', '%' || p_search_term || '%')
+        );
+    END IF;
+
+    -- Filter conditions
+    IF p_exam_id_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('ex.exam_id = %L', p_exam_id_filter));
+    END IF;
+    IF p_madrasa_id_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('ex.madrasa_id = %L', p_madrasa_id_filter));
+    END IF;
+    IF p_marhala_id_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('ex.marhala_id = %L', p_marhala_id_filter));
+    END IF;
+    IF p_status_filter IS NOT NULL AND p_status_filter <> '' THEN
+        _where_clauses := array_append(_where_clauses, format('ex.status = %L', p_status_filter));
+    END IF;
+    IF p_reg_no_start_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('ex.registration_number >= %L', p_reg_no_start_filter));
+    END IF;
+    IF p_reg_no_end_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('ex.registration_number <= %L', p_reg_no_end_filter));
+    END IF;
+
+    -- Base query for selecting items with details
+    _query := '
+        SELECT
+            ex.id, ex.exam_id, ex.madrasa_id, ex.marhala_id,
+            ex.registration_number, ex.student_type,
+            ex.name_bn, ex.name_ar, ex.name_en,
+            ex.father_name_bn, ex.father_name_ar, ex.father_name_en,
+            ex.mother_name_bn, ex.mother_name_ar, ex.mother_name_en,
+            ex.date_of_birth, ex.nid_or_birth_cert, ex.photo_url,
+            ex.status, ex.roll_number, ex.registration_input_date,
+            exam.name AS exam_name,
+            mad.name_bn AS madrasa_name_bn,
+            mad.madrasa_code,
+            mar.name_bn AS marhala_name_bn,
+            mar.type AS marhala_type
+        FROM public.examinees ex
+        LEFT JOIN public.exams exam ON ex.exam_id = exam.id
+        LEFT JOIN public.madrasas mad ON ex.madrasa_id = mad.id
+        LEFT JOIN public.marhalas mar ON ex.marhala_id = mar.id
+        WHERE ' || array_to_string(_where_clauses, ' AND ');
+
+    -- Construct count query FROM the same base filters but without joins needed only for display fields
+    -- This makes the count query potentially more efficient.
+    _count_query := 'SELECT COUNT(ex.id) FROM public.examinees ex WHERE ' || array_to_string(_where_clauses, ' AND ');
+    EXECUTE _count_query INTO _total_items;
+
+    -- Add sorting (validate sort field and order)
+    IF p_sort_field IS NOT NULL AND (lower(p_sort_order) = 'asc' OR lower(p_sort_order) = 'desc') THEN
+        IF p_sort_field IN ('registration_number', 'name_bn', 'registration_input_date', 'status', 'roll_number') THEN
+            _query := _query || format(' ORDER BY ex.%I %s NULLS LAST', p_sort_field, p_sort_order);
+        ELSEIF p_sort_field = 'exam_name' THEN
+             _query := _query || format(' ORDER BY exam.name %s NULLS LAST', p_sort_order);
+        ELSEIF p_sort_field = 'madrasa_name_bn' THEN
+             _query := _query || format(' ORDER BY mad.name_bn %s NULLS LAST', p_sort_order);
+        ELSEIF p_sort_field = 'marhala_name_bn' THEN
+             _query := _query || format(' ORDER BY mar.name_bn %s NULLS LAST', p_sort_order);
+        ELSE
+            _query := _query || ' ORDER BY ex.registration_input_date DESC NULLS LAST'; -- Default sort
+        END IF;
+    ELSE
+        _query := _query || ' ORDER BY ex.registration_input_date DESC NULLS LAST'; -- Default sort
+    END IF;
+
+    -- Add pagination
+    _query := _query || format(' LIMIT %L OFFSET %L', p_limit, _offset);
+    
+    -- Get items as JSON array
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _query || ') q' INTO _items_jsonb;
+    
+    RETURN jsonb_build_object('items', _items_jsonb, 'totalItems', _total_items);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_examinees_list_with_details(INTEGER, INTEGER, TEXT, UUID, UUID, UUID, TEXT, INTEGER, INTEGER, TEXT, TEXT) TO authenticated;
+    

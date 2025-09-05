@@ -1,0 +1,25 @@
+-- ১. handle_updated_at ফাংশন তৈরি করুন (যদি আগে তৈরি না হয়ে থাকে)
+-- এই ফাংশনটি অন্যান্য টেবিলের জন্যও ব্যবহৃত হতে পারে।
+CREATE OR REPLACE FUNCTION public.handle_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ২. zones টেবিলে created_at কলাম যোগ করুন (যদি না থাকে)
+ALTER TABLE public.zones
+ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL;
+
+-- ৩. zones টেবিলে updated_at কলাম যোগ করুন (যদি না থাকে)
+ALTER TABLE public.zones
+ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL;
+
+-- ৪. zones টেবিলে updated_at কলামের জন্য ট্রিগার সেট করুন
+-- (আগে থেকে ট্রিগার থাকলে সেটি মুছে নতুন করে তৈরি করবে)
+DROP TRIGGER IF EXISTS on_zones_updated ON public.zones;
+CREATE TRIGGER on_zones_updated
+BEFORE UPDATE ON public.zones
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();

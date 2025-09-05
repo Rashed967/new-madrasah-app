@@ -1,0 +1,74 @@
+
+CREATE OR REPLACE FUNCTION public.get_certificate_applications_list(
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10,
+    p_exam_id_filter UUID DEFAULT NULL,
+    p_status_filter TEXT DEFAULT NULL,
+    p_search_term TEXT DEFAULT NULL -- Search by application_id, examinee_name, roll
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    _offset INTEGER;
+    _items_jsonb JSONB;
+    _total_items INTEGER;
+    _base_query TEXT;
+    _data_query TEXT;
+    _count_query TEXT;
+    _where_clauses TEXT[] := ARRAY['TRUE'];
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    IF p_exam_id_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('ca.exam_id = %L', p_exam_id_filter));
+    END IF;
+
+    IF p_status_filter IS NOT NULL AND p_status_filter <> '' THEN
+        _where_clauses := array_append(_where_clauses, format('ca.application_status = %L', p_status_filter));
+    END IF;
+
+    IF p_search_term IS NOT NULL AND TRIM(p_search_term) <> '' THEN
+        _where_clauses := array_append(_where_clauses, format(
+            '(ca.id::text ILIKE %1$L OR ex.name_bn ILIKE %1$L OR ex.roll_number::text ILIKE %1$L)',
+            '%' || TRIM(p_search_term) || '%'
+        ));
+    END IF;
+
+    _base_query := '
+        FROM public.certificate_applications ca
+        JOIN public.examinees ex ON ca.examinee_id = ex.id
+        JOIN public.exams e ON ca.exam_id = e.id
+        WHERE ' || array_to_string(_where_clauses, ' AND ');
+
+    _count_query := 'SELECT COUNT(ca.id)' || _base_query;
+    EXECUTE _count_query INTO _total_items;
+
+    _data_query := '
+        SELECT
+            ca.id,
+            ca.total_fee,
+            ca.contact_mobile,
+            ca.payment_status,
+            ca.application_status,
+            ca.created_at,
+            ca.applied_certificates,
+            ca.notes_by_admin,
+            ex.name_bn as examinee_name,
+            ex.father_name_bn as father_name,
+            ex.roll_number as examinee_roll,
+            ex.registration_number as examinee_reg,
+            (SELECT name_bn FROM public.madrasas WHERE id = ex.madrasa_id) as madrasa_name,
+            e.name as exam_name
+        ' || _base_query || '
+        ORDER BY ca.created_at DESC
+        LIMIT ' || p_limit || ' OFFSET ' || _offset;
+
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _data_query || ') q' INTO _items_jsonb;
+    
+    RETURN jsonb_build_object('items', _items_jsonb, 'totalItems', _total_items);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_certificate_applications_list(INTEGER, INTEGER, UUID, TEXT, TEXT) TO authenticated;

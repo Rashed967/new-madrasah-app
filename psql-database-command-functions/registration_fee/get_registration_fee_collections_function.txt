@@ -1,0 +1,105 @@
+
+
+CREATE OR REPLACE FUNCTION public.get_registration_fee_collections(
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10,
+    p_search_term TEXT DEFAULT NULL,
+    p_exam_id_filter UUID DEFAULT NULL, -- New parameter for filtering by exam_id
+    p_madrasa_id_filter UUID DEFAULT NULL -- New parameter for filtering by madrasa_id
+)
+RETURNS JSONB -- Returns { items: RegistrationFeeCollection[], totalItems: number }
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    _offset INTEGER;
+    _items_jsonb JSONB;
+    _total_items INTEGER;
+    _base_query TEXT;
+    _data_query TEXT;
+    _count_query TEXT;
+    _search_condition TEXT := '';
+    _filter_condition TEXT := '';
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    IF p_search_term IS NOT NULL AND p_search_term <> '' THEN
+        _search_condition := format(' AND (rfc.id::text ILIKE %1$L OR rfc.receipt_no::text ILIKE %1$L OR e.name ILIKE %1$L OR m.name_bn ILIKE %1$L OR m.madrasa_code::text ILIKE %1$L)', '%' || p_search_term || '%');
+    END IF;
+
+    IF p_exam_id_filter IS NOT NULL THEN
+        _filter_condition := _filter_condition || format(' AND rfc.exam_id = %L', p_exam_id_filter);
+    END IF;
+    IF p_madrasa_id_filter IS NOT NULL THEN
+        _filter_condition := _filter_condition || format(' AND rfc.madrasa_id = %L', p_madrasa_id_filter);
+    END IF;
+
+
+    _base_query := '
+        FROM public.registration_fee_collections rfc
+        JOIN public.exams e ON rfc.exam_id = e.id
+        JOIN public.madrasas m ON rfc.madrasa_id = m.id
+        WHERE TRUE' || _search_condition || _filter_condition;
+
+    _count_query := 'SELECT COUNT(rfc.id)' || _base_query;
+    EXECUTE _count_query INTO _total_items;
+    
+    _data_query := '
+        SELECT
+            rfc.id,
+            rfc.receipt_no,
+            rfc.exam_id,
+            e.name AS exam_name,
+            rfc.madrasa_id,
+            m.name_bn AS madrasa_name_bn,
+            m.madrasa_code AS madrasa_code,
+            rfc.apply_late_fee,
+            rfc.collection_date,
+            rfc.total_calculated_fee,
+            rfc.total_paid_amount,
+            rfc.balance_amount,
+            rfc.created_at,
+            (
+                SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                    ''marhala_id'', rfmc.marhala_id, 
+                    ''marhalaNameBn'', mar.name_bn,
+                    ''regular_students'', rfmc.regular_students, 
+                    ''irregular_students'', rfmc.irregular_students, 
+                    ''calculated_fee_for_marhala'', rfmc.calculated_fee_for_marhala, 
+                    ''registration_number_range_start'', rfmc.registration_number_range_start, 
+                    ''registration_number_range_end'', rfmc.registration_number_range_end    
+                ) ORDER BY mar.marhala_order), ''[]''::jsonb)
+                FROM public.registration_fee_marhala_counts rfmc
+                JOIN public.marhalas mar ON rfmc.marhala_id = mar.id
+                WHERE rfmc.registration_fee_collection_id = rfc.id
+            ) AS marhala_student_counts,
+            (
+                SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                    ''id'', rfp.id,
+                    ''method'', rfp.method,
+                    ''amount'', rfp.amount,
+                    ''paymentDate'', rfp.payment_date, 
+                    ''transactionId'', rfp.transaction_id, 
+                    ''bankName'', rfp.bank_name, 
+                    ''branchName'', rfp.branch_name, 
+                    ''accountNumber'', rfp.account_number, 
+                    ''checkNumber'', rfp.check_number, 
+                    ''mobileBankingProvider'', rfp.mobile_banking_provider, 
+                    ''senderNumber'', rfp.sender_number, 
+                    ''receiverNumber'', rfp.receiver_number, 
+                    ''notes'', rfp.notes
+                ) ORDER BY rfp.created_at), ''[]''::jsonb)
+                FROM public.registration_fee_payments rfp
+                WHERE rfp.registration_fee_collection_id = rfc.id
+            ) AS payments
+        ' || _base_query || '
+        ORDER BY rfc.collection_date DESC, rfc.created_at DESC
+        LIMIT ' || p_limit || ' OFFSET ' || _offset;
+    
+    EXECUTE 'SELECT COALESCE(jsonb_agg(q), ''[]''::jsonb) FROM (' || _data_query || ') q' INTO _items_jsonb;
+    
+    RETURN jsonb_build_object('items', _items_jsonb, 'totalItems', _total_items);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_registration_fee_collections(INTEGER, INTEGER, TEXT, UUID, UUID) TO authenticated;

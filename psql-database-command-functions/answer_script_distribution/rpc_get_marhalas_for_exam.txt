@@ -1,0 +1,13 @@
+
+-- New function to get marhalas relevant to a specific exam
+CREATE OR REPLACE FUNCTION public.get_marhalas_for_exam(p_exam_id UUID)
+RETURNS SETOF public.marhalas
+LANGUAGE sql STABLE SECURITY DEFINER AS $$
+    SELECT DISTINCT m.*
+    FROM public.marhalas m
+    JOIN public.exam_marhala_fees emf ON m.id = emf.marhala_id
+    WHERE emf.exam_id = p_exam_id
+    ORDER BY m.marhala_order;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_marhalas_for_exam(UUID) TO authenticated;

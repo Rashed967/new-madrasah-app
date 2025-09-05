@@ -1,0 +1,52 @@
+CREATE OR REPLACE FUNCTION public.create_kitab_with_auto_code(
+    p_name_bn TEXT,
+    p_name_ar TEXT,
+    p_full_marks INTEGER
+)
+RETURNS kitabs -- 'kitabs' আপনার কিতাব টেবিলের নাম। ফাংশনটি সম্পূর্ণ নতুন রো রিটার্ন করবে।
+LANGUAGE plpgsql
+SECURITY DEFINER -- নিরাপত্তা DEFINER হিসেবে সেট করা হয়েছে, যাতে ফাংশনটি টেবিলের সব রো অ্যাক্সেস করতে পারে কোড জেনারেশনের জন্য।
+AS $$
+DECLARE
+    v_kitab_code TEXT;
+    v_last_code_numeric INTEGER;
+    v_new_kitab kitabs%ROWTYPE;
+BEGIN
+    -- ইনপুট ভ্যালিডেশন
+    IF p_name_bn IS NULL OR p_name_bn = '' THEN
+        RAISE EXCEPTION 'কিতাবের বাংলা নাম আবশ্যক (Bengali name is required)';
+    END IF;
+    IF p_full_marks IS NULL OR p_full_marks <= 0 THEN
+        RAISE EXCEPTION 'পূর্ণ নম্বর একটি ধনাত্মক সংখ্যা হতে হবে (Full marks must be a positive number)';
+    END IF;
+
+    -- একই নামে অন্য কিতাব আছে কিনা দেখুন
+    PERFORM 1 FROM public.kitabs WHERE name_bn = p_name_bn;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই বাংলা নামে একটি কিতাব ইতিমধ্যে বিদ্যমান: "%"', p_name_bn
+        USING ERRCODE = '23505', DETAIL = 'Duplicate kitab name_bn', HINT = 'অন্য নাম ব্যবহার করুন (Use a different name)'; 
+    END IF;
+
+    -- কিতাব কোড জেনারেট করুন (যেমন: KB001, KB002)
+    SELECT COALESCE(MAX(SUBSTRING(kitab_code FROM 'KB(\d+)')::INTEGER), 0)
+    INTO v_last_code_numeric
+    FROM public.kitabs
+    WHERE kitab_code ~ '^KB\d{3,}$';
+
+    v_kitab_code := 'KB' || LPAD((v_last_code_numeric + 1)::TEXT, 3, '0');
+
+    -- নতুন কিতাব যোগ করুন
+    -- updated_at এবং created_at কলামগুলো এখন টেবিলের ডিফল্ট ভ্যালু বা ট্রিগার দ্বারা হ্যান্ডেল হবে,
+    -- অথবা ফাংশনের মাধ্যমে NOW() দিয়ে সেট করা হবে যদি কলামগুলো বিদ্যমান থাকে।
+    -- যেহেতু আমরা টেবিলে DEFAULT NOW() দিয়েছি, তাই এখানে explicit ভাবে না দিলেও চলতো, 
+    -- কিন্তু দেওয়াটাও ভুল নয়।
+    INSERT INTO public.kitabs (kitab_code, name_bn, name_ar, full_marks, created_at, updated_at)
+    VALUES (v_kitab_code, p_name_bn, p_name_ar, p_full_marks, NOW(), NOW())
+    RETURNING * INTO v_new_kitab;
+
+    RETURN v_new_kitab;
+END;
+$$;
+
+-- ফাংশনটি চালানোর জন্য authenticated ব্যবহারকারীদের অনুমতি দিন
+GRANT EXECUTE ON FUNCTION public.create_kitab_with_auto_code(TEXT, TEXT, INTEGER) TO authenticated;

@@ -1,0 +1,18 @@
+
+-- New function to get all kitabs for a given marhala
+CREATE OR REPLACE FUNCTION public.get_kitabs_by_marhala(p_marhala_id UUID)
+RETURNS SETOF public.kitabs
+LANGUAGE sql STABLE SECURITY DEFINER AS $$
+    -- Selects all kitab records where the kitab's ID is present in the
+    -- kitab_ids array of the specified marhala.
+    -- The `unnest` function expands the uuid[] array into a set of rows,
+    -- which is compatible with the `ANY` operator.
+    SELECT k.*
+    FROM public.kitabs k
+    WHERE k.id = ANY(
+        SELECT unnest(kitab_ids) FROM public.marhalas WHERE id = p_marhala_id
+    )
+    ORDER BY k.name_bn;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_kitabs_by_marhala(UUID) TO authenticated;

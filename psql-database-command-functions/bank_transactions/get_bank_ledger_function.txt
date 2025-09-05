@@ -1,0 +1,91 @@
+
+CREATE OR REPLACE FUNCTION public.get_bank_ledger(
+    p_account_id UUID,
+    p_start_date DATE,
+    p_end_date DATE
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_opening_balance NUMERIC;
+    v_report JSONB;
+BEGIN
+    -- Step 1: Calculate the opening balance as of p_start_date
+    WITH initial_balance AS (
+        SELECT opening_balance FROM public.bank_accounts WHERE id = p_account_id
+    ),
+    prior_transactions_sum AS (
+        SELECT COALESCE(SUM(
+            CASE
+                -- "Transfer from" means this account RECEIVED money (deposit)
+                WHEN type = 'deposit' OR (type = 'transfer' AND description LIKE 'Transfer from%') THEN amount
+                -- "Transfer to" means this account SENT money (withdrawal)
+                WHEN type = 'withdrawal' OR (type = 'transfer' AND description LIKE 'Transfer to%') THEN -amount
+                ELSE 0
+            END
+        ), 0) as net_change
+        FROM public.bank_transactions
+        WHERE account_id = p_account_id AND transaction_date < p_start_date
+    )
+    SELECT initial_balance.opening_balance + prior_transactions_sum.net_change
+    INTO v_opening_balance
+    FROM initial_balance, prior_transactions_sum;
+    
+    -- If the account exists but has no prior transactions, its opening balance is the account's opening_balance
+    v_opening_balance := COALESCE(v_opening_balance, (SELECT opening_balance FROM public.bank_accounts WHERE id = p_account_id), 0);
+
+    -- Step 2: Get transactions within the date range and calculate running balance
+    WITH transactions_in_range AS (
+        SELECT
+            transaction_date,
+            description,
+            CASE 
+                WHEN type = 'deposit' OR (type = 'transfer' AND description LIKE 'Transfer from%') THEN amount
+                ELSE 0 
+            END AS deposit,
+            CASE 
+                WHEN type = 'withdrawal' OR (type = 'transfer' AND description LIKE 'Transfer to%') THEN amount
+                ELSE 0 
+            END AS withdrawal,
+            created_at
+        FROM public.bank_transactions
+        WHERE account_id = p_account_id
+          AND transaction_date >= p_start_date
+          AND transaction_date <= p_end_date
+    ),
+    transactions_with_running_balance AS (
+        SELECT
+            transaction_date,
+            description,
+            deposit,
+            withdrawal,
+            created_at, -- This column must be selected to be used in the final order by
+            (v_opening_balance + SUM(deposit - withdrawal) OVER (ORDER BY transaction_date ASC, created_at ASC)) AS running_balance
+        FROM transactions_in_range
+    )
+    SELECT jsonb_build_object(
+        'opening_balance', v_opening_balance,
+        'total_deposits', (SELECT COALESCE(SUM(deposit), 0) FROM transactions_in_range),
+        'total_withdrawals', (SELECT COALESCE(SUM(withdrawal), 0) FROM transactions_in_range),
+        'closing_balance', v_opening_balance + (SELECT COALESCE(SUM(deposit - withdrawal), 0) FROM transactions_in_range),
+        'transactions', COALESCE(jsonb_agg(
+            jsonb_build_object(
+                'transaction_date', trb.transaction_date::text,
+                'description', trb.description,
+                'deposit', trb.deposit,
+                'withdrawal', trb.withdrawal,
+                'running_balance', trb.running_balance
+            ) ORDER BY trb.transaction_date ASC, trb.created_at ASC
+        ), '[]'::jsonb)
+    )
+    INTO v_report
+    FROM transactions_with_running_balance trb;
+
+    RETURN v_report;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_bank_ledger(UUID, DATE, DATE) TO authenticated;

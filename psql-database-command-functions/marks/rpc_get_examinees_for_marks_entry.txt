@@ -1,0 +1,29 @@
+
+CREATE OR REPLACE FUNCTION public.get_examinees_for_marks_entry(
+    p_distribution_id UUID
+)
+RETURNS TABLE (
+    examinee_id UUID,
+    roll_number INTEGER,
+    name_bn TEXT,
+    registration_number INTEGER,
+    madrasa_name_bn TEXT
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT 
+        dsd.examinee_id, 
+        dsd.roll_number,
+        ex.name_bn,
+        ex.registration_number,
+        mad.name_bn as madrasa_name_bn
+    FROM public.distributed_script_details dsd
+    JOIN public.examinees ex ON dsd.examinee_id = ex.id
+    JOIN public.madrasas mad ON ex.madrasa_id = mad.id
+    WHERE dsd.distribution_id = p_distribution_id
+    ORDER BY dsd.roll_number ASC NULLS LAST;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_examinees_for_marks_entry(UUID) TO authenticated;

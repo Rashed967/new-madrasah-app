@@ -1,0 +1,33 @@
+
+CREATE OR REPLACE FUNCTION public.delete_registration_fee_collection(
+    p_collection_id UUID
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+    v_current_user_id UUID;
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'ফি সংগ্রহের রেকর্ড মুছে ফেলার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_collection_id IS NULL THEN
+        RAISE EXCEPTION 'সংগ্রহের আইডি আবশ্যক।';
+    END IF;
+
+    DELETE FROM public.registration_fee_collections
+    WHERE id = p_collection_id;
+
+    IF NOT FOUND THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো ফি সংগ্রহের রেকর্ড পাওয়া যায়নি।', p_collection_id;
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.delete_registration_fee_collection(UUID) TO authenticated;

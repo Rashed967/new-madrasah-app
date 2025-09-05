@@ -1,0 +1,13 @@
+
+CREATE OR REPLACE FUNCTION public.get_kitabs_for_script_distribution(p_exam_id UUID)
+RETURNS TABLE (id UUID, name_bn TEXT, kitab_code TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER AS $$
+    SELECT DISTINCT k.id, k.name_bn, k.kitab_code
+    FROM public.kitabs k
+    JOIN public.marhalas mar ON k.id = ANY(mar.kitab_ids) -- Kitab is in one of the marhala's kitab list
+    JOIN public.exam_marhala_fees emf ON mar.id = emf.marhala_id -- That marhala has fees defined for the exam
+    WHERE emf.exam_id = p_exam_id
+    ORDER BY k.name_bn;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_kitabs_for_script_distribution(UUID) TO authenticated;

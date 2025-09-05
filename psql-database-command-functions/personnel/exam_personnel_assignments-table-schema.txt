@@ -1,0 +1,52 @@
+-- Ensure the handle_updated_at function exists
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at() ... (if not already created)
+
+CREATE TABLE IF NOT EXISTS public.exam_personnel_assignments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    exam_id UUID NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+    markaz_id UUID NOT NULL REFERENCES public.markazes(id) ON DELETE CASCADE,
+    personnel_id UUID NOT NULL REFERENCES public.teachers(id) ON DELETE CASCADE, -- Updated to reference teachers table
+    
+    assigned_role TEXT NOT NULL CHECK (assigned_role IN ('mumtahin', 'negran')), 
+    assigned_marhala_id UUID REFERENCES public.marhalas(id) ON DELETE SET NULL, 
+
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+
+    CONSTRAINT unique_personnel_assignment_per_exam_markaz_marhala UNIQUE (exam_id, markaz_id, personnel_id, assigned_marhala_id),
+    
+    CONSTRAINT check_negran_no_marhala CHECK (
+        (assigned_role = 'negran' AND assigned_marhala_id IS NULL) OR (assigned_role <> 'negran')
+    ),
+    CONSTRAINT check_mumtahin_has_marhala CHECK (
+        (assigned_role = 'mumtahin' AND assigned_marhala_id IS NOT NULL) OR (assigned_role <> 'mumtahin')
+    )
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_epa_exam_id ON public.exam_personnel_assignments(exam_id);
+CREATE INDEX IF NOT EXISTS idx_epa_markaz_id ON public.exam_personnel_assignments(markaz_id);
+CREATE INDEX IF NOT EXISTS idx_epa_personnel_id ON public.exam_personnel_assignments(personnel_id);
+CREATE INDEX IF NOT EXISTS idx_epa_assigned_role ON public.exam_personnel_assignments(assigned_role);
+CREATE INDEX IF NOT EXISTS idx_epa_assigned_marhala_id ON public.exam_personnel_assignments(assigned_marhala_id);
+CREATE INDEX IF NOT EXISTS idx_epa_exam_markaz_personnel ON public.exam_personnel_assignments(exam_id, markaz_id, personnel_id);
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_exam_personnel_assignments_updated ON public.exam_personnel_assignments;
+CREATE TRIGGER on_exam_personnel_assignments_updated
+BEFORE UPDATE ON public.exam_personnel_assignments
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies (Example - adjust as needed)
+-- ALTER TABLE public.exam_personnel_assignments ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow admin full access for exam_personnel_assignments" 
+--   ON public.exam_personnel_assignments
+--   FOR ALL TO authenticated 
+--   USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+--   WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+-- CREATE POLICY "Allow read for authenticated users for exam_personnel_assignments"
+--   ON public.exam_personnel_assignments
+--   FOR SELECT TO authenticated
+--   USING (true);

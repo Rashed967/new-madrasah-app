@@ -1,0 +1,31 @@
+
+CREATE TABLE IF NOT EXISTS public.certificate_types (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name_bn TEXT NOT NULL UNIQUE,
+    fee NUMERIC(8, 2) NOT NULL DEFAULT 0.00,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_certificate_types_updated ON public.certificate_types;
+CREATE TRIGGER on_certificate_types_updated
+BEFORE UPDATE ON public.certificate_types
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS
+ALTER TABLE public.certificate_types ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow public read access for active certificate types"
+ON public.certificate_types FOR SELECT TO anon, authenticated USING (is_active = TRUE);
+CREATE POLICY "Allow admin full access for certificate types"
+ON public.certificate_types FOR ALL TO authenticated
+USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+-- Initial data seed
+INSERT INTO public.certificate_types (name_bn, fee, is_active)
+VALUES
+    ('মার্কশিট (নম্বরপত্র)', 150.00, TRUE),
+    ('মূল সনদ', 300.00, TRUE)
+ON CONFLICT (name_bn) DO NOTHING;

@@ -1,0 +1,70 @@
+
+CREATE OR REPLACE FUNCTION public.get_all_mumtahins_for_exam(
+    p_exam_id UUID,
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    _items_jsonb JSONB;
+    _total_items INTEGER;
+    _offset INTEGER;
+    _data_query TEXT;
+    _count_query TEXT;
+    _where_conditions TEXT;
+BEGIN
+    IF p_exam_id IS NULL THEN
+        RAISE EXCEPTION 'পরীক্ষা আইডি আবশ্যক।';
+    END IF;
+
+    _offset := (p_page - 1) * p_limit;
+
+    _where_conditions := format(
+        'WHERE epa.exam_id = %L
+           AND epa.assigned_role = ''mumtahin''
+           AND epa.markaz_id IS NULL       
+           AND epa.assigned_marhala_id IS NULL',
+        p_exam_id
+    );
+
+    _count_query := '
+        SELECT COUNT(epa.id)
+        FROM public.exam_personnel_assignments epa
+        JOIN public.teachers t ON epa.personnel_id = t.id '
+        || _where_conditions;
+
+    EXECUTE _count_query INTO _total_items;
+
+    _data_query := '
+        SELECT
+            epa.id AS assignment_id,
+            t.id AS personnel_id,
+            t.name_bn AS personnel_name_bn,
+            t.teacher_code AS personnel_code,
+            t.mobile AS personnel_mobile,
+            t.nid_number AS personnel_nid_number,
+            t.email AS personnel_email,
+            (SELECT m_edu.name_bn FROM public.marhalas m_edu WHERE m_edu.id = t.educational_qualification LIMIT 1) AS educational_qualification_name_bn,
+            (SELECT array_agg(k.name_bn) FROM public.kitabs k WHERE t.kitabi_qualification IS NOT NULL AND k.id = ANY(t.kitabi_qualification)) AS kitabi_qualification_names
+        FROM public.exam_personnel_assignments epa
+        JOIN public.teachers t ON epa.personnel_id = t.id '
+        || _where_conditions || '
+        ORDER BY t.name_bn
+        LIMIT ' || p_limit || ' OFFSET ' || _offset;
+    
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _data_query || ') q' INTO _items_jsonb;
+
+    RETURN jsonb_build_object(
+        'items', _items_jsonb,
+        'totalItems', _total_items,
+        'currentPage', p_page
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_all_mumtahins_for_exam(UUID, INTEGER, INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_all_mumtahins_for_exam(UUID) TO authenticated; -- For calls with default params

@@ -1,0 +1,47 @@
+-- টেবিল তৈরি করার আগে যদি ফাংশনটি তৈরি না থাকে, তাহলে তৈরি করে নিন
+CREATE OR REPLACE FUNCTION public.handle_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- kitabs টেবিল তৈরি করার কমান্ড
+CREATE TABLE IF NOT EXISTS public.kitabs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    kitab_code TEXT UNIQUE NOT NULL,
+    name_bn TEXT UNIQUE NOT NULL,
+    name_ar TEXT,
+    full_marks INTEGER NOT NULL CHECK (full_marks > 0),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+-- updated_at কলাম স্বয়ংক্রিয়ভাবে আপডেট করার জন্য ট্রিগার
+-- এই ট্রিগারটি রান করার আগে নিশ্চিত করুন যে handle_updated_at ফাংশনটি তৈরি করা হয়েছে।
+DROP TRIGGER IF EXISTS on_kitabs_updated ON public.kitabs; -- যদি আগে থেকে থাকে, মুছে ফেলুন
+CREATE TRIGGER on_kitabs_updated
+BEFORE UPDATE ON public.kitabs
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- টেবিলের মালিকানা সেট করা (সাধারণত Supabase এটি নিজে থেকেই করে)
+-- ALTER TABLE public.kitabs OWNER TO postgres; -- আপনার Supabase প্রজেক্টের ডিফল্ট ইউজার
+-- GRANT ALL ON TABLE public.kitabs TO postgres;
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.kitabs TO authenticated; -- authenticated রোলের জন্য অনুমতি
+-- GRANT SELECT ON TABLE public.kitabs TO anon; -- anon রোলের জন্য শুধুমাত্র SELECT অনুমতি (যদি প্রয়োজন হয়)
+
+-- RLS পলিসি (উদাহরণ)
+-- ALTER TABLE public.kitabs ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow all access to authenticated users" ON public.kitabs
+-- FOR ALL
+-- TO authenticated
+-- USING (true)
+-- WITH CHECK (true);
+
+-- CREATE POLICY "Allow read access to anon users" ON public.kitabs
+-- FOR SELECT
+-- TO anon
+-- USING (true);
+

@@ -1,0 +1,28 @@
+{
+  "name": "new-copy-of-madrasah-dashboard---06-08-2025",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "@tanstack/react-query": "^5.81.5",
+    "@tanstack/react-query-devtools": "^5.81.5",
+    "react-router-dom": "^7.6.3",
+    "recharts": "^3.0.2",
+    "@supabase/supabase-js": "^2.50.2",
+    "@hello-pangea/dnd": "^18.0.1",
+    "appwrite": "^18.1.1",
+    "print-js": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}

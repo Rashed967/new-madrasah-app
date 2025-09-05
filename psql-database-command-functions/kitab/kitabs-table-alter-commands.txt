@@ -1,0 +1,26 @@
+-- প্রথমে দেখুন আপনার kitabs টেবিলে created_at কলাম আছে কিনা। 
+-- না থাকলে নিচের কমান্ডটি রান করুন:
+-- ALTER TABLE public.kitabs
+-- ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL;
+
+-- updated_at কলাম যোগ করার কমান্ড:
+ALTER TABLE public.kitabs
+ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL;
+
+-- (ঐচ্ছিক কিন্তু প্রস্তাবিত) updated_at কলাম স্বয়ংক্রিয়ভাবে আপডেট করার জন্য একটি ট্রিগার ফাংশন তৈরি করুন
+CREATE OR REPLACE FUNCTION public.handle_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- (ঐচ্ছিক কিন্তু প্রস্তাবিত) kitabs টেবিলে ট্রিগারটি সেট করুন
+-- এই ট্রিগারটি রান করার আগে নিশ্চিত করুন যে handle_updated_at ফাংশনটি তৈরি করা হয়েছে।
+DROP TRIGGER IF EXISTS on_kitabs_updated ON public.kitabs; -- যদি আগে থেকে থাকে, মুছে ফেলুন
+CREATE TRIGGER on_kitabs_updated
+BEFORE UPDATE ON public.kitabs
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+

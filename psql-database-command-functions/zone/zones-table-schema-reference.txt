@@ -1,0 +1,32 @@
+-- handle_updated_at ফাংশন (যদি আগে তৈরি না হয়ে থাকে)
+CREATE OR REPLACE FUNCTION public.handle_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- zones টেবিল
+CREATE TABLE IF NOT EXISTS public.zones (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    zone_code TEXT UNIQUE NOT NULL,
+    name_bn TEXT UNIQUE NOT NULL,
+    districts TEXT[] NOT NULL CHECK (array_length(districts, 1) > 0), -- অন্তত একটি জেলা থাকতে হবে
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+-- updated_at কলামের জন্য ট্রিগার (যদি handle_updated_at ফাংশনটি আগে তৈরি না থাকে)
+DROP TRIGGER IF EXISTS on_zones_updated ON public.zones; 
+CREATE TRIGGER on_zones_updated
+BEFORE UPDATE ON public.zones
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS পলিসি (উদাহরণ)
+-- ALTER TABLE public.zones ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow all access to authenticated users for zones" ON public.zones
+-- FOR ALL TO authenticated USING (true) WITH CHECK (true);
+-- CREATE POLICY "Allow read access to anon users for zones" ON public.zones
+-- FOR SELECT TO anon USING (true);

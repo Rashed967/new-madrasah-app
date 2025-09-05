@@ -1,0 +1,7 @@
+-- This trigger is no longer needed as the approval logic is now initiated
+-- from the client, which calls an Edge Function directly.
+-- The Edge function now handles both user creation and calling the RPC to finalize approval.
+-- Keeping the file as a historical reference, but the trigger should be dropped or disabled.
+--
+-- DROP TRIGGER IF EXISTS on_madrasa_application_approved ON public.madrasa_applications;
+-- DROP FUNCTION IF EXISTS public.send_madrasa_approval_email();

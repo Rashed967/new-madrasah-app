@@ -1,0 +1,45 @@
+-- Ensure the handle_updated_at function exists (create if not)
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at() ... (if not already created)
+
+CREATE TABLE IF NOT EXISTS public.teacher_user_mapping ( 
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    teacher_id UUID NOT NULL REFERENCES public.teachers(id) ON DELETE CASCADE, 
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    
+    CONSTRAINT unique_teacher_user_mapping UNIQUE (teacher_id, user_id), 
+    CONSTRAINT unique_teacher_id_mapping UNIQUE (teacher_id), 
+    CONSTRAINT unique_user_id_mapping_for_teacher UNIQUE (user_id) 
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_tum_teacher_id ON public.teacher_user_mapping(teacher_id); 
+CREATE INDEX IF NOT EXISTS idx_tum_user_id ON public.teacher_user_mapping(user_id); 
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_teacher_user_mapping_updated ON public.teacher_user_mapping; 
+CREATE TRIGGER on_teacher_user_mapping_updated 
+BEFORE UPDATE ON public.teacher_user_mapping 
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies
+ALTER TABLE public.teacher_user_mapping ENABLE ROW LEVEL SECURITY; 
+
+-- Admins have full access
+CREATE POLICY "Allow admin full access for teacher_user_mapping"  
+  ON public.teacher_user_mapping 
+  FOR ALL TO authenticated 
+  USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+  WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+-- Teachers can select their own mapping record
+CREATE POLICY "Teacher can select their own user mapping" 
+  ON public.teacher_user_mapping 
+  FOR SELECT TO authenticated
+  USING (auth.uid() = user_id);
+  
+-- Generally, teachers should not be able to update or delete their mapping. This is an admin/system task.
+-- If there's a specific need for teachers to modify their mapping, add specific policies here.
+-- For instance, if a teacher can disassociate their account (which should likely be a controlled process).

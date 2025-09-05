@@ -1,0 +1,31 @@
+
+CREATE OR REPLACE FUNCTION public.remove_exam_personnel_assignment(
+    p_assignment_id UUID
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+BEGIN
+    -- Role Check
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'কর্মকর্তা নিয়োগ বাতিল করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_assignment_id IS NULL THEN
+        RAISE EXCEPTION 'নিয়োগ আইডি আবশ্যক।';
+    END IF;
+
+    DELETE FROM public.exam_personnel_assignments WHERE id = p_assignment_id;
+
+    IF NOT FOUND THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো নিয়োগ খুঁজে পাওয়া যায়নি।', p_assignment_id;
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.remove_exam_personnel_assignment(UUID) TO authenticated;

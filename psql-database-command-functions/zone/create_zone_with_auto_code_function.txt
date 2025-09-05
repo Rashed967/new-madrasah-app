@@ -1,0 +1,54 @@
+
+CREATE OR REPLACE FUNCTION public.create_zone_with_auto_code(
+    p_name_bn TEXT,
+    p_districts TEXT[]
+)
+RETURNS zones -- zones টেবিলের টাইপ রিটার্ন করবে
+LANGUAGE plpgsql
+SECURITY DEFINER 
+AS $$
+DECLARE
+    v_zone_code TEXT;
+    v_last_code_numeric INTEGER;
+    v_new_zone zones%ROWTYPE;
+BEGIN
+    -- ইনপুট ভ্যালিডেশন
+    IF p_name_bn IS NULL OR p_name_bn = '' THEN
+        RAISE EXCEPTION 'জোনের বাংলা নাম আবশ্যক (Zone Bengali name is required)';
+    END IF;
+    IF p_districts IS NULL OR array_length(p_districts, 1) IS NULL OR array_length(p_districts, 1) = 0 THEN
+        RAISE EXCEPTION 'অন্তত একটি জেলা আবশ্যক (At least one district is required)';
+    END IF;
+
+    -- একই নামে অন্য জোন আছে কিনা দেখুন
+    PERFORM 1 FROM public.zones WHERE name_bn = p_name_bn;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই বাংলা নামে একটি জোন ইতিমধ্যে বিদ্যমান: "%"', p_name_bn
+        USING ERRCODE = '23505', DETAIL = 'Duplicate zone name_bn', HINT = 'অন্য নাম ব্যবহার করুন (Use a different name)';
+    END IF;
+
+    -- জোন কোড জেনারেট করুন (যেমন: ZN001, ZN002)
+    SELECT COALESCE(MAX(SUBSTRING(zone_code FROM 'ZN(\d+)')::INTEGER), 0)
+    INTO v_last_code_numeric
+    FROM public.zones
+    WHERE zone_code ~ '^ZN\d{3,}$';
+
+    v_zone_code := 'ZN' || LPAD((v_last_code_numeric + 1)::TEXT, 3, '0');
+    
+    -- নতুন জোন যোগ করুন
+    INSERT INTO public.zones (zone_code, name_bn, districts, created_at, updated_at)
+    VALUES (
+        v_zone_code, 
+        p_name_bn, 
+        p_districts, 
+        NOW(), 
+        NOW()
+    )
+    RETURNING * INTO v_new_zone;
+
+    RETURN v_new_zone;
+END;
+$$;
+
+-- ফাংশনটি চালানোর জন্য authenticated ব্যবহারকারীদের অনুমতি দিন
+GRANT EXECUTE ON FUNCTION public.create_zone_with_auto_code(TEXT, TEXT[]) TO authenticated;

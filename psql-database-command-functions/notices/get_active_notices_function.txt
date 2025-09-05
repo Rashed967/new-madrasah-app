@@ -1,0 +1,9 @@
+-- Function to get active notices (for public)
+CREATE OR REPLACE FUNCTION get_active_notices()
+RETURNS TABLE (id BIGINT, title TEXT, content TEXT, created_at TIMESTAMPTZ)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY SELECT notices.id, notices.title, notices.content, notices.created_at FROM notices WHERE is_active = TRUE ORDER BY created_at DESC;
+END;
+$$;

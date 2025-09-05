@@ -1,0 +1,33 @@
+
+CREATE OR REPLACE FUNCTION public.delete_official(
+    p_id UUID
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+    v_deleted_order_index INTEGER;
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = auth.uid();
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'এই কার্যক্রমের জন্য আপনার অনুমতি নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Get the order_index of the official being deleted to re-order others
+    SELECT order_index INTO v_deleted_order_index FROM public.officials WHERE id = p_id;
+
+    DELETE FROM public.officials WHERE id = p_id;
+
+    IF FOUND THEN
+        -- Re-order the subsequent officials
+        UPDATE public.officials
+        SET order_index = order_index - 1
+        WHERE order_index > v_deleted_order_index;
+    ELSE
+        RAISE WARNING 'কর্মকর্তা আইডি (%) পাওয়া যায়নি, কিছুই মোছা হয়নি।', p_id;
+    END IF;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.delete_official(UUID) TO authenticated;

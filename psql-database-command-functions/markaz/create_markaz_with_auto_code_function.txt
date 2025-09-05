@@ -1,0 +1,80 @@
+
+CREATE OR REPLACE FUNCTION public.create_markaz_with_auto_code(
+    p_name_bn TEXT,
+    p_host_madrasa_id UUID,
+    p_zone_id UUID,
+    p_examinee_capacity INTEGER
+)
+RETURNS markazes -- Returns the newly created markaz row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_host_madrasa_code INTEGER; -- To store the host madrasa's code
+    v_new_markaz markazes%ROWTYPE;
+    v_host_madrasa_name TEXT;
+    _p_name_bn_final TEXT;
+    v_user_role TEXT;
+    v_current_user_id UUID;
+BEGIN
+    v_current_user_id := auth.uid();
+    -- Assuming user_profiles table exists and stores roles
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'মারকায তৈরির অনুমতি আপনার নেই।' USING ERRCODE = '42501'; -- permission_denied
+    END IF;
+
+    -- Input Validations
+    IF p_host_madrasa_id IS NULL THEN RAISE EXCEPTION 'হোস্ট মাদরাসা আইডি আবশ্যক।'; END IF;
+    IF p_zone_id IS NULL THEN RAISE EXCEPTION 'জোন আইডি আবশ্যক।'; END IF;
+    IF p_examinee_capacity IS NULL OR p_examinee_capacity <= 0 THEN RAISE EXCEPTION 'পরীক্ষার্থীর ধারণক্ষমতা অবশ্যই ধনাত্মক সংখ্যা হতে হবে।'; END IF;
+
+    -- Check if host madrasa exists and get its name and code
+    SELECT name_bn, madrasa_code INTO v_host_madrasa_name, v_host_madrasa_code 
+    FROM public.madrasas 
+    WHERE id = p_host_madrasa_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত হোস্ট মাদরাসা আইডি (%) খুঁজে পাওয়া যায়নি।', p_host_madrasa_id USING ERRCODE = '23503'; -- foreign_key_violation
+    END IF;
+
+    IF v_host_madrasa_code IS NULL THEN
+        RAISE EXCEPTION 'হোস্ট মাদ্রাসার (%s) জন্য মাদরাসা কোড পাওয়া যায়নি। মারকায তৈরি করা সম্ভব নয়।', v_host_madrasa_name;
+    END IF;
+
+    -- Default markaz name to host madrasa name if p_name_bn is not provided or is empty
+    _p_name_bn_final := COALESCE(NULLIF(TRIM(p_name_bn), ''), v_host_madrasa_name || ' কেন্দ্র');
+
+    -- Check if zone exists
+    PERFORM 1 FROM public.zones WHERE id = p_zone_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত জোন আইডি (%) খুঁজে পাওয়া যায়নি।', p_zone_id USING ERRCODE = '23503'; -- foreign_key_violation
+    END IF;
+
+    -- Check for duplicate name_bn for markaz (using the finalized name)
+    PERFORM 1 FROM public.markazes WHERE name_bn = _p_name_bn_final;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই নামে (%s) একটি মারকায ইতিমধ্যে বিদ্যমান।', _p_name_bn_final
+        USING ERRCODE = '23505'; -- unique_violation
+    END IF;
+    
+    -- Check if host madrasa is already a host for another markaz (unique constraint on host_madrasa_id handles this at DB level)
+    -- Also check if the madrasa_code (which will be the markaz_code) is already used as a markaz_code
+    PERFORM 1 FROM public.markazes WHERE host_madrasa_id = p_host_madrasa_id OR markaz_code = v_host_madrasa_code;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই মাদরাসাটি (%s - কোড: %s) ইতিমধ্যে একটি মারকাযের হোস্ট অথবা এই মাদরাসা কোড দিয়ে অন্য মারকায বিদ্যমান।', v_host_madrasa_name, v_host_madrasa_code
+        USING ERRCODE = '23505'; -- unique_violation (for host_madrasa_id or markaz_code)
+    END IF;
+
+    INSERT INTO public.markazes (
+        markaz_code, name_bn, host_madrasa_id, zone_id, examinee_capacity, is_active, created_at, updated_at
+    ) VALUES (
+        v_host_madrasa_code, _p_name_bn_final, p_host_madrasa_id, p_zone_id, p_examinee_capacity, TRUE, NOW(), NOW()
+    ) RETURNING * INTO v_new_markaz;
+
+    RETURN v_new_markaz;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_markaz_with_auto_code(TEXT, UUID, UUID, INTEGER) TO authenticated;

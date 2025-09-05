@@ -1,0 +1,81 @@
+
+CREATE OR REPLACE FUNCTION public.get_exam_statistics(p_exam_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_overall_stats JSONB;
+    v_marhala_stats JSONB;
+BEGIN
+    -- Calculate Overall Statistics
+    WITH overall AS (
+        SELECT
+            SUM(count) AS total_examinees,
+            SUM(count) FILTER (WHERE status = 'কৃতকার্য') AS total_passed,
+            SUM(count) FILTER (WHERE status = 'অকৃতকার্য') AS total_failed,
+            jsonb_object_agg(grade, count) FILTER (WHERE grade IS NOT NULL) AS grades
+        FROM (
+            SELECT grade, status, COUNT(*) as count
+            FROM public.exam_results
+            WHERE exam_id = p_exam_id
+            GROUP BY grade, status
+        ) as grade_counts
+    )
+    SELECT jsonb_build_object(
+        'total_examinees', total_examinees,
+        'total_passed', total_passed,
+        'total_failed', total_failed,
+        'pass_rate', CASE WHEN total_examinees > 0 THEN (total_passed::NUMERIC / total_examinees) * 100 ELSE 0 END,
+        'grades', COALESCE(grades, '{}'::jsonb)
+    )
+    INTO v_overall_stats
+    FROM overall;
+
+    -- Calculate Per-Marhala Statistics
+    WITH marhala_base AS (
+        SELECT
+            ex.marhala_id,
+            er.status,
+            er.grade
+        FROM public.exam_results er
+        JOIN public.examinees ex ON er.examinee_id = ex.id
+        WHERE er.exam_id = p_exam_id
+    ),
+    marhala_grouped AS (
+        SELECT
+            marhala_id,
+            SUM(count) AS total_examinees,
+            SUM(count) FILTER (WHERE status = 'কৃতকার্য') AS total_passed,
+            SUM(count) FILTER (WHERE status = 'অকৃতকার্য') AS total_failed,
+            jsonb_object_agg(grade, count) FILTER (WHERE grade IS NOT NULL) AS grades
+        FROM (
+            SELECT marhala_id, grade, status, COUNT(*) as count
+            FROM marhala_base
+            GROUP BY marhala_id, grade, status
+        ) as grade_counts
+        GROUP BY marhala_id
+    )
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'marhala_id', mg.marhala_id,
+            'marhala_name', m.name_bn,
+            'total_examinees', mg.total_examinees,
+            'total_passed', mg.total_passed,
+            'total_failed', mg.total_failed,
+            'pass_rate', CASE WHEN mg.total_examinees > 0 THEN (mg.total_passed::NUMERIC / mg.total_examinees) * 100 ELSE 0 END,
+            'grades', COALESCE(mg.grades, '{}'::jsonb)
+        ) ORDER BY m.marhala_order
+    ), '[]'::jsonb)
+    INTO v_marhala_stats
+    FROM marhala_grouped mg
+    JOIN public.marhalas m ON mg.marhala_id = m.id;
+    
+    RETURN jsonb_build_object(
+        'overall_stats', v_overall_stats,
+        'marhala_stats', v_marhala_stats
+    );
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_exam_statistics(UUID) TO authenticated;

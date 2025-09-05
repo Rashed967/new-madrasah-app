@@ -1,0 +1,55 @@
+-- One-Time Manual Update Script
+-- Purpose: To fix the status of examinees who have all marks entered but are
+-- stuck in a pre-completion status due to the previous trigger bug.
+-- RUN THIS SCRIPT ONCE in the Supabase SQL Editor after applying the new trigger and function changes.
+
+WITH examinee_mark_counts AS (
+  -- Count the number of marks entered for each examinee in each exam
+  SELECT
+    examinee_id,
+    exam_id,
+    COUNT(id) as entered_marks
+  FROM public.marks
+  GROUP BY examinee_id, exam_id
+),
+examinee_kitab_counts AS (
+  -- Get the total number of kitabs required for each examinee's marhala
+  SELECT
+    ex.id as examinee_id,
+    ex.exam_id,
+    COALESCE(array_length(mar.kitab_ids, 1), 0) as total_kitabs
+  FROM public.examinees ex
+  JOIN public.marhalas mar ON ex.marhala_id = mar.id
+)
+UPDATE public.examinees
+SET status = 'Completed'
+WHERE id IN (
+  -- Find examinees where the entered mark count matches the required kitab count
+  -- and whose status is currently one that precedes 'Completed'.
+  SELECT
+    ekc.examinee_id
+  FROM examinee_kitab_counts ekc
+  JOIN examinee_mark_counts emc ON ekc.examinee_id = emc.examinee_id AND ekc.exam_id = emc.exam_id
+  WHERE ekc.total_kitabs > 0
+    AND ekc.total_kitabs = emc.entered_marks
+)
+AND status IN ('roll_assigned', 'script_distributed');
+
+-- You can run this SELECT statement first to see how many examinees will be affected:
+/*
+SELECT COUNT(*) FROM public.examinees
+WHERE id IN (
+  SELECT ekc.examinee_id
+  FROM (
+    SELECT ex.id as examinee_id, ex.exam_id, COALESCE(array_length(mar.kitab_ids, 1), 0) as total_kitabs
+    FROM public.examinees ex
+    JOIN public.marhalas mar ON ex.marhala_id = mar.id
+  ) ekc
+  JOIN (
+    SELECT examinee_id, exam_id, COUNT(id) as entered_marks
+    FROM public.marks GROUP BY examinee_id, exam_id
+  ) emc ON ekc.examinee_id = emc.examinee_id AND ekc.exam_id = emc.exam_id
+  WHERE ekc.total_kitabs > 0 AND ekc.total_kitabs = emc.entered_marks
+)
+AND status IN ('roll_assigned', 'script_distributed');
+*/

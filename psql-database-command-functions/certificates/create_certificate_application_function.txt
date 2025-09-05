@@ -1,0 +1,38 @@
+
+CREATE OR REPLACE FUNCTION public.create_certificate_application(
+    p_examinee_id UUID,
+    p_exam_id UUID,
+    p_applied_certificates JSONB,
+    p_total_fee NUMERIC,
+    p_contact_mobile TEXT
+)
+RETURNS public.certificate_applications
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_application public.certificate_applications%ROWTYPE;
+BEGIN
+    -- Input validation
+    IF p_examinee_id IS NULL OR p_exam_id IS NULL OR p_applied_certificates IS NULL OR p_total_fee IS NULL OR p_contact_mobile IS NULL THEN
+        RAISE EXCEPTION 'সকল প্রয়োজনীয় ফিল্ড পূরণ করা আবশ্যক।';
+    END IF;
+
+    INSERT INTO public.certificate_applications (
+        examinee_id, exam_id, applied_certificates, total_fee, contact_mobile,
+        payment_status, payment_details, application_status
+    ) VALUES (
+        p_examinee_id, p_exam_id, p_applied_certificates, p_total_fee, p_contact_mobile,
+        'paid', -- Assuming payment is completed before calling this.
+        jsonb_build_object(
+            'method', 'mock_payment',
+            'transaction_id', 'MOCK_' || gen_random_uuid()::text,
+            'status', 'completed'
+        ),
+        'pending'
+    ) RETURNING * INTO v_new_application;
+
+    RETURN v_new_application;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.create_certificate_application(UUID, UUID, JSONB, NUMERIC, TEXT) TO anon, authenticated;

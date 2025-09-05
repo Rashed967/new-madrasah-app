@@ -1,0 +1,71 @@
+
+CREATE OR REPLACE FUNCTION public.get_bank_dashboard_data()
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_total_balance NUMERIC;
+    v_accounts JSONB;
+    v_recent_transactions JSONB;
+BEGIN
+    -- Calculate total balance
+    SELECT COALESCE(SUM(current_balance), 0)
+    INTO v_total_balance
+    FROM public.bank_accounts
+    WHERE is_active = TRUE;
+
+    -- Get all active accounts
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'id', ba.id,
+            'bank_name', ba.bank_name,
+            'branch_name', ba.branch_name,
+            'account_name', ba.account_name,
+            'account_number', ba.account_number,
+            'account_type', ba.account_type,
+            'opening_date', ba.opening_date,
+            'opening_balance', ba.opening_balance,
+            'current_balance', ba.current_balance,
+            'is_active', ba.is_active,
+            'created_at', ba.created_at,
+            'updated_at', ba.updated_at
+        ) ORDER BY ba.bank_name
+    ), '[]'::jsonb)
+    INTO v_accounts
+    FROM public.bank_accounts ba
+    WHERE ba.is_active = TRUE;
+
+    -- Get recent transactions
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'id', bt.id,
+            'account_id', bt.account_id,
+            'bank_name', ba.bank_name,
+            'account_name', ba.account_name,
+            'type', bt.type,
+            'amount', bt.amount,
+            'transaction_date', bt.transaction_date,
+            'description', bt.description,
+            'balance_after', bt.balance_after
+        ) ORDER BY bt.transaction_date DESC, bt.created_at DESC
+    ), '[]'::jsonb)
+    INTO v_recent_transactions
+    FROM (
+        SELECT * 
+        FROM public.bank_transactions 
+        ORDER BY transaction_date DESC, created_at DESC 
+        LIMIT 15
+    ) bt
+    JOIN public.bank_accounts ba ON bt.account_id = ba.id;
+
+    RETURN jsonb_build_object(
+        'total_balance', v_total_balance,
+        'accounts', v_accounts,
+        'recent_transactions', v_recent_transactions
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_bank_dashboard_data() TO authenticated;

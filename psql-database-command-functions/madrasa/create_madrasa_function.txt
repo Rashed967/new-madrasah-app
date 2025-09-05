@@ -1,0 +1,109 @@
+
+
+CREATE OR REPLACE FUNCTION public.create_madrasa(
+    p_name_bn TEXT,
+    p_name_ar TEXT,
+    p_name_en TEXT,
+    p_address JSONB,
+    p_zone_id UUID,
+    p_mobile1 TEXT,
+    p_mobile2 TEXT,
+    p_type TEXT,
+    p_dispatch_method TEXT,
+    p_highest_marhala_boys_id UUID,
+    p_highest_marhala_girls_id UUID,
+    p_muhtamim JSONB,
+    p_education_secretary JSONB,
+    p_mutawalli JSONB,
+    p_registration_date DATE,
+    p_ilhak_form_url TEXT
+)
+RETURNS madrasas -- Returns the newly created madrasa row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_madrasa madrasas%ROWTYPE;
+    v_user_role TEXT;
+    v_current_user_id UUID;
+    v_new_madrasa_code INTEGER;
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'মাদরাসা তৈরির অনুমতি আপনার নেই।'
+        USING ERRCODE = '42501';
+    END IF;
+
+    -- Input Validations
+    IF p_name_bn IS NULL OR p_name_bn = '' THEN RAISE EXCEPTION 'মাদ্রাসার বাংলা নাম আবশ্যক।'; END IF;
+    IF p_name_ar IS NULL OR p_name_ar = '' THEN RAISE EXCEPTION 'মাদ্রাসার আরবী নাম আবশ্যক।'; END IF;
+    IF p_address IS NULL THEN RAISE EXCEPTION 'ঠিকানার তথ্য আবশ্যক।'; END IF;
+    IF p_zone_id IS NULL THEN RAISE EXCEPTION 'জোন আইডি আবশ্যক।'; END IF;
+    IF p_mobile1 IS NULL OR p_mobile1 = '' THEN RAISE EXCEPTION 'প্রথম মোবাইল নম্বর আবশ্যক।'; END IF;
+    IF NOT (p_mobile1 ~ '^(01[3-9]\d{8})$') THEN RAISE EXCEPTION 'প্রথম মোবাইল নম্বরটি সঠিক নয় (১১ সংখ্যা হতে হবে এবং 013-019 দিয়ে শুরু হতে হবে)।'; END IF;
+    IF p_mobile2 IS NOT NULL AND p_mobile2 <> '' AND NOT (p_mobile2 ~ '^(01[3-9]\d{8})$') THEN RAISE EXCEPTION 'দ্বিতীয় মোবাইল নম্বরটি সঠিক নয় (১১ সংখ্যা হতে হবে এবং 013-019 দিয়ে শুরু হতে হবে)।'; END IF;
+    IF p_type IS NULL OR NOT (p_type IN ('boys', 'girls', 'both')) THEN RAISE EXCEPTION 'মাদ্রাসার ধরণ সঠিক নয়।'; END IF;
+    IF p_muhtamim IS NULL THEN RAISE EXCEPTION 'মুহতামিমের তথ্য আবশ্যক।'; END IF;
+    IF p_registration_date IS NULL THEN RAISE EXCEPTION 'নিবন্ধনের তারিখ আবশ্যক।'; END IF;
+
+    -- Check foreign key existence for zone
+    PERFORM 1 FROM public.zones WHERE id = p_zone_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত জোন আইডি (%) পাওয়া যায়নি।', p_zone_id USING ERRCODE = '23503';
+    END IF;
+
+    -- Check marhala selections based on type
+    IF p_type = 'boys' THEN
+        IF p_highest_marhala_boys_id IS NULL THEN RAISE EXCEPTION 'বালক মাদ্রাসার জন্য সর্বোচ্চ বালক মারহালা আবশ্যক।'; END IF;
+        IF p_highest_marhala_girls_id IS NOT NULL THEN RAISE EXCEPTION 'বালক মাদ্রাসার জন্য বালিকা মারহালা নির্বাচন করা যাবে না।'; END IF;
+        PERFORM 1 FROM public.marhalas WHERE id = p_highest_marhala_boys_id AND type = 'boys';
+        IF NOT FOUND THEN RAISE EXCEPTION 'বালকদের জন্য প্রদত্ত সর্বোচ্চ মারহালা আইডি (%) সঠিক নয় অথবা এটি বালক মারহালা নয়।', p_highest_marhala_boys_id USING ERRCODE = '23503'; END IF;
+    ELSIF p_type = 'girls' THEN
+        IF p_highest_marhala_girls_id IS NULL THEN RAISE EXCEPTION 'বালিকা মাদ্রাসার জন্য সর্বোচ্চ বালিকা মারহালা আবশ্যক।'; END IF;
+        IF p_highest_marhala_boys_id IS NOT NULL THEN RAISE EXCEPTION 'বালিকা মাদ্রাসার জন্য বালক মারহালা নির্বাচন করা যাবে না।'; END IF;
+        PERFORM 1 FROM public.marhalas WHERE id = p_highest_marhala_girls_id AND type = 'girls';
+        IF NOT FOUND THEN RAISE EXCEPTION 'বালিকাদের জন্য প্রদত্ত সর্বোচ্চ মারহালা আইডি (%) সঠিক নয় অথবা এটি বালিকা মারহালা নয়।', p_highest_marhala_girls_id USING ERRCODE = '23503'; END IF;
+    ELSIF p_type = 'both' THEN
+        IF p_highest_marhala_boys_id IS NULL THEN RAISE EXCEPTION 'উভয় প্রকারের মাদ্রাসার জন্য বালক মারহালা আবশ্যক।'; END IF;
+        IF p_highest_marhala_girls_id IS NULL THEN RAISE EXCEPTION 'উভয় প্রকারের মাদ্রাসার জন্য বালিকা মারহালা আবশ্যক।'; END IF;
+        PERFORM 1 FROM public.marhalas WHERE id = p_highest_marhala_boys_id AND type = 'boys';
+        IF NOT FOUND THEN RAISE EXCEPTION 'বালকদের জন্য প্রদত্ত মারহালা আইডি (%) সঠিক নয়।', p_highest_marhala_boys_id USING ERRCODE = '23503'; END IF;
+        PERFORM 1 FROM public.marhalas WHERE id = p_highest_marhala_girls_id AND type = 'girls';
+        IF NOT FOUND THEN RAISE EXCEPTION 'বালিকাদের জন্য প্রদত্ত মারহালা আইডি (%) সঠিক নয়।', p_highest_marhala_girls_id USING ERRCODE = '23503'; END IF;
+    END IF;
+
+    -- Generate madrasa_code
+    SELECT COALESCE(MAX(madrasa_code), 10000) + 1 INTO v_new_madrasa_code FROM public.madrasas;
+    IF v_new_madrasa_code < 10001 THEN
+        v_new_madrasa_code := 10001;
+    END IF;
+    -- Ensure uniqueness of the generated code (in case of concurrent transactions, though less likely with MAX + 1)
+    WHILE EXISTS (SELECT 1 FROM public.madrasas WHERE madrasa_code = v_new_madrasa_code) LOOP
+        v_new_madrasa_code := v_new_madrasa_code + 1;
+    END LOOP;
+
+
+    INSERT INTO public.madrasas (
+        madrasa_code, name_bn, name_ar, name_en, address, zone_id, mobile1, mobile2,
+        type, dispatch_method, highest_marhala_boys_id, highest_marhala_girls_id,
+        muhtamim, education_secretary, mutawalli, registration_date, ilhak_form_url,
+        created_at, updated_at
+    ) VALUES (
+        v_new_madrasa_code,
+        p_name_bn, p_name_ar, p_name_en, p_address, p_zone_id, p_mobile1, p_mobile2,
+        p_type, p_dispatch_method,
+        CASE WHEN p_type = 'girls' THEN NULL ELSE p_highest_marhala_boys_id END, 
+        CASE WHEN p_type = 'boys' THEN NULL ELSE p_highest_marhala_girls_id END,
+        p_muhtamim, p_education_secretary, p_mutawalli, p_registration_date, p_ilhak_form_url,
+        NOW(), NOW()
+    ) RETURNING * INTO v_new_madrasa;
+
+    RETURN v_new_madrasa;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_madrasa(
+    TEXT, TEXT, TEXT, JSONB, UUID, TEXT, TEXT, TEXT, TEXT, UUID, UUID, JSONB, JSONB, JSONB, DATE, TEXT
+) TO authenticated;

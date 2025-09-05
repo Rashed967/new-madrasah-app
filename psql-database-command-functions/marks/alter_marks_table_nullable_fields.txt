@@ -1,0 +1,12 @@
+-- Altering the marks table to allow NULL values for distribution_id and examiner_id
+-- This is necessary for the Markaz-based marks entry feature, where marks are not
+-- tied to a specific examiner or distribution batch.
+
+ALTER TABLE public.marks
+ALTER COLUMN distribution_id DROP NOT NULL;
+
+ALTER TABLE public.marks
+ALTER COLUMN examiner_id DROP NOT NULL;
+
+COMMENT ON COLUMN public.marks.distribution_id IS 'Link to the distribution batch. Can be NULL if entered via a non-distribution method (e.g., markaz-based entry).';
+COMMENT ON COLUMN public.marks.examiner_id IS 'The Teacher ID of the examiner who graded this script. Can be NULL if entered via a non-examiner-based method.';

@@ -1,0 +1,25 @@
+-- Step 1: Add the new 'status' column.
+-- It defaults to 'present', which is correct for all existing rows that have a mark.
+ALTER TABLE public.marks
+ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'present' CHECK (status IN ('present', 'absent', 'expelled'));
+
+-- Step 2: Make 'obtained_marks' nullable.
+-- This is necessary to store 'absent' or 'expelled' statuses where there is no mark.
+ALTER TABLE public.marks
+ALTER COLUMN obtained_marks DROP NOT NULL;
+
+-- Step 3: Add the new CHECK constraint that links the logic of 'status' and 'obtained_marks'.
+-- Drop it first in case a partial attempt was made from a previous schema file.
+ALTER TABLE public.marks
+DROP CONSTRAINT IF EXISTS check_marks_based_on_status;
+
+-- The new constraint ensures that if a student is 'present', they MUST have a mark.
+-- If they are 'absent' or 'expelled', the mark MUST be NULL.
+ALTER TABLE public.marks
+ADD CONSTRAINT check_marks_based_on_status CHECK (
+    (status = 'present' AND obtained_marks IS NOT NULL) OR
+    (status IN ('absent', 'expelled') AND obtained_marks IS NULL)
+);
+
+-- Note: No data backfill is needed. Existing rows had a NOT NULL 'obtained_marks'
+-- and will get a default 'status' of 'present', which satisfies the new constraint.

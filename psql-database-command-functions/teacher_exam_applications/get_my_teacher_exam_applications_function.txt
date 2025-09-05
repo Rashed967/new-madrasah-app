@@ -1,0 +1,61 @@
+
+CREATE OR REPLACE FUNCTION public.get_my_teacher_exam_applications()
+RETURNS JSONB -- Returns an array of TeacherExamApplication objects
+LANGUAGE plpgsql
+STABLE -- Function only reads data
+SECURITY DEFINER -- To get teacher_id based on auth.uid()
+AS $$
+DECLARE
+    v_current_user_id UUID := auth.uid();
+    v_teacher_id_from_mapping UUID;
+    v_applications_jsonb JSONB;
+BEGIN
+    IF v_current_user_id IS NULL THEN
+        RAISE EXCEPTION 'ব্যবহারকারী লগইন করা নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    SELECT teacher_id INTO v_teacher_id_from_mapping
+    FROM public.teacher_user_mapping
+    WHERE user_id = v_current_user_id;
+
+    IF v_teacher_id_from_mapping IS NULL THEN
+        RAISE EXCEPTION 'আপনার শিক্ষক প্রোফাইল খুঁজে পাওয়া যায়নি।';
+    END IF;
+
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'id', tea.id,
+            'teacher_id', tea.teacher_id,
+            'exam_id', tea.exam_id,
+            'exam_name', ex.name, -- Joined from exams table
+            'applying_from_madrasa_id', tea.applying_from_madrasa_id,
+            'applying_from_madrasa_name_bn', mad.name_bn, -- Joined from madrasas table
+            'preferred_marhala_category', tea.preferred_marhala_category,
+            'kitabi_teaching_details', tea.kitabi_teaching_details,
+            'teaching_experience_years', tea.teaching_experience_years,
+            'application_role_preference', tea.application_role_preference,
+            'preferred_role_type', tea.preferred_role_type,
+            'preferred_kitabs_for_evaluation', tea.preferred_kitabs_for_evaluation,
+            'has_previous_experience', tea.has_previous_experience,
+            'previous_experience_role_type', tea.previous_experience_role_type,
+            'previous_experience_kitab_names', tea.previous_experience_kitab_names,
+            'application_status', tea.application_status,
+            'application_date', tea.application_date,
+            'notes_by_applicant', tea.notes_by_applicant,
+            'reviewed_by', tea.reviewed_by,
+            'review_notes', tea.review_notes,
+            'created_at', tea.created_at,
+            'updated_at', tea.updated_at
+        ) ORDER BY tea.application_date DESC
+    ), '[]'::jsonb)
+    INTO v_applications_jsonb
+    FROM public.teacher_exam_applications tea
+    JOIN public.exams ex ON tea.exam_id = ex.id
+    LEFT JOIN public.madrasas mad ON tea.applying_from_madrasa_id = mad.id
+    WHERE tea.teacher_id = v_teacher_id_from_mapping;
+
+    RETURN v_applications_jsonb;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_my_teacher_exam_applications() TO authenticated;

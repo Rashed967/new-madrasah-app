@@ -1,0 +1,5 @@
+import { Exam, Marhala, SelectOption as GlobalSelectOption, KitabApiResponse, MarhalaApiResponse } from '../../../types';
+
+export const mapApiExamToFrontend = (apiExam: any): Exam => ({ id: apiExam.id, name: apiExam.name, status: apiExam.status, isActive: apiExam.is_active, registrationDeadline: apiExam.registration_deadline, startingRegistrationNumber: apiExam.starting_registration_number, registrationFeeRegular: 0, registrationFeeIrregular: 0, lateRegistrationFeeRegular: 0, lateRegistrationFeeIrregular: 0, examFees: [] });
+export const mapApiMarhalaToFrontend = (apiMarhala: MarhalaApiResponse): Marhala => ({ id: apiMarhala.id, nameBn: apiMarhala.name_bn, type: apiMarhala.type, category: apiMarhala.category, kitabIds: apiMarhala.kitab_ids || [], marhala_code: apiMarhala.marhala_code, marhala_order: apiMarhala.marhala_order });
+export const mapApiKitabToFrontend = (apiKitab: KitabApiResponse): GlobalSelectOption => ({ value: apiKitab.id, label: `${apiKitab.name_bn} (${apiKitab.kitab_code})` });

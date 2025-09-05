@@ -1,0 +1,90 @@
+CREATE OR REPLACE FUNCTION public.create_madrasa_inspection(
+    p_madrasa_id UUID,
+    p_exam_id UUID,
+    p_inspection_date DATE,
+    p_inspector_name TEXT,
+    p_comments TEXT,
+    p_fees JSONB
+)
+RETURNS madrasa_inspections
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_inspection madrasa_inspections%ROWTYPE;
+    v_user_role TEXT;
+    v_fee JSONB;
+    v_category_id UUID;
+    v_madrasa_name TEXT;
+    v_transaction_description TEXT;
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = auth.uid();
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'পরিদর্শন রিপোর্ট তৈরির অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Basic validations
+    IF p_madrasa_id IS NULL THEN RAISE EXCEPTION 'মাদরাসা আইডি আবশ্যক।'; END IF;
+    IF p_inspection_date IS NULL THEN RAISE EXCEPTION 'পরিদর্শনের তারিখ আবশ্যক।'; END IF;
+    IF p_inspector_name IS NULL OR TRIM(p_inspector_name) = '' THEN RAISE EXCEPTION 'পরিদর্শকের নাম আবশ্যক।'; END IF;
+
+    INSERT INTO public.madrasa_inspections (
+        madrasa_id,
+        exam_id,
+        inspection_date,
+        inspector_name,
+        comments,
+        fees,
+        created_by
+    ) VALUES (
+        p_madrasa_id,
+        p_exam_id,
+        p_inspection_date,
+        p_inspector_name,
+        p_comments,
+        COALESCE(p_fees, '[]'::jsonb),
+        auth.uid()
+    ) RETURNING * INTO v_new_inspection;
+
+    -- Create transactions for each fee
+    IF p_fees IS NOT NULL THEN
+        -- Get madrasa name for transaction description
+        SELECT name_bn INTO v_madrasa_name FROM public.madrasas WHERE id = p_madrasa_id;
+
+        FOR v_fee IN SELECT * FROM jsonb_array_elements(p_fees)
+        LOOP
+            -- Get category ID from fee type (which is the category name)
+            SELECT id INTO v_category_id
+            FROM public.transaction_categories
+            WHERE name = v_fee->>'type' AND type = 'income'
+            LIMIT 1;
+
+            -- Create transaction if category is found and amount is valid
+            IF v_category_id IS NOT NULL AND (v_fee->>'amount')::NUMERIC > 0 THEN
+                v_transaction_description := 'পরিদর্শন বাবদ আয়: ' || (v_fee->>'type') || ' (' || v_madrasa_name || ')';
+
+                INSERT INTO public.transactions (
+                    transaction_date,
+                    category_id,
+                    amount,
+                    type,
+                    party_name,
+                    description,
+                    created_by
+                ) VALUES (
+                    p_inspection_date,
+                    v_category_id,
+                    (v_fee->>'amount')::NUMERIC,
+                    'income',
+                    v_madrasa_name,
+                    v_transaction_description,
+                    auth.uid()
+                );
+            END IF;
+        END LOOP;
+    END IF;
+
+    RETURN v_new_inspection;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.create_madrasa_inspection(UUID, UUID, DATE, TEXT, TEXT, JSONB) TO authenticated;

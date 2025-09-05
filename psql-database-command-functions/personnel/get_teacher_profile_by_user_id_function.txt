@@ -1,0 +1,44 @@
+CREATE OR REPLACE FUNCTION public.get_teacher_profile_by_user_id(
+    p_user_id UUID
+)
+RETURNS teachers -- Returns the full teacher row
+LANGUAGE plpgsql
+STABLE -- As it only reads data
+SECURITY DEFINER -- If RLS policies on teachers table are restrictive
+-- SECURITY INVOKER -- If RLS policies on teachers table allow user to select their own row
+AS $$
+DECLARE
+    v_teacher_record teachers%ROWTYPE;
+    v_teacher_id_from_mapping UUID;
+BEGIN
+    IF p_user_id IS NULL THEN
+        RAISE EXCEPTION 'ব্যবহারকারী আইডি আবশ্যক।';
+    END IF;
+
+    -- Get teacher_id from teacher_user_mapping
+    SELECT teacher_id INTO v_teacher_id_from_mapping
+    FROM public.teacher_user_mapping
+    WHERE user_id = p_user_id;
+
+    IF v_teacher_id_from_mapping IS NULL THEN
+        RAISE EXCEPTION 'এই ব্যবহারকারীর জন্য কোনো শিক্ষক প্রোফাইল ম্যাপিং পাওয়া যায়নি।';
+        -- This implies the user might be an auth.user but not linked to a teacher profile
+        -- Or, if called immediately after signup before mapping is complete (unlikely with current flow).
+    END IF;
+
+    -- Get teacher profile details
+    SELECT * INTO v_teacher_record
+    FROM public.teachers
+    WHERE id = v_teacher_id_from_mapping;
+
+    IF NOT FOUND THEN
+        -- This case should be rare if mapping exists and FK constraints are in place
+        RAISE EXCEPTION 'শিক্ষক প্রোফাইল (আইডি: %) পাওয়া যায়নি, যদিও ম্যাপিং বিদ্যমান।', v_teacher_id_from_mapping;
+    END IF;
+
+    RETURN v_teacher_record;
+END;
+$$;
+
+-- Grant execute permission
+GRANT EXECUTE ON FUNCTION public.get_teacher_profile_by_user_id(UUID) TO authenticated;

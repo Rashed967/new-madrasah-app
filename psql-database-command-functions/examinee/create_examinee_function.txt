@@ -1,0 +1,146 @@
+CREATE OR REPLACE FUNCTION public.create_examinee(
+    p_collection_id UUID,
+    p_exam_id UUID,
+    p_madrasa_id UUID,
+    p_marhala_id UUID,
+    p_student_type TEXT,
+    p_name_bn TEXT,
+    p_name_ar TEXT,
+    p_name_en TEXT,
+    p_father_name_bn TEXT,
+    p_father_name_ar TEXT,
+    p_father_name_en TEXT,
+    p_mother_name_bn TEXT,
+    p_mother_name_ar TEXT,
+    p_mother_name_en TEXT,
+    p_date_of_birth DATE,
+    p_nid_or_birth_cert TEXT,
+    p_photo_url TEXT DEFAULT NULL,
+    p_past_year_roll INTEGER DEFAULT NULL,
+    p_past_year_marhala TEXT DEFAULT NULL,
+    p_past_exam_year INTEGER DEFAULT NULL,
+    p_past_year_total_number INTEGER DEFAULT NULL,
+    p_past_year_division TEXT DEFAULT NULL,
+    p_past_year_comment TEXT DEFAULT NULL
+)
+RETURNS examinees -- Returns the newly created examinee row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $
+DECLARE
+    v_new_examinee examinees%ROWTYPE;
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+    
+    v_marhala_count_record public.registration_fee_details%ROWTYPE;
+    v_registered_regular_count INTEGER;
+    v_registered_irregular_count INTEGER;
+    v_next_registration_number INTEGER;
+    v_existing_reg_numbers INTEGER[];
+
+BEGIN
+    -- Role Check (Ensure user has permission)
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'পরীক্ষার্থী নিবন্ধনের অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Input Validations
+    IF p_collection_id IS NULL THEN RAISE EXCEPTION 'ফি সংগ্রহ আইডি আবশ্যক।'; END IF;
+    IF p_exam_id IS NULL THEN RAISE EXCEPTION 'পরীক্ষা আইডি আবশ্যক।'; END IF;
+    IF p_madrasa_id IS NULL THEN RAISE EXCEPTION 'মাদরাসা আইডি আবশ্যক।'; END IF;
+    IF p_marhala_id IS NULL THEN RAISE EXCEPTION 'মারহালা আইডি আবশ্যক।'; END IF;
+    IF p_student_type IS NULL OR NOT (p_student_type IN ('regular', 'irregular')) THEN RAISE EXCEPTION 'শিক্ষার্থীর ধরণ (regular/irregular) আবশ্যক।'; END IF;
+    IF p_name_bn IS NULL OR TRIM(p_name_bn) = '' THEN RAISE EXCEPTION 'পরীক্ষার্থীর বাংলা নাম আবশ্যক।'; END IF;
+    IF p_father_name_bn IS NULL OR TRIM(p_father_name_bn) = '' THEN RAISE EXCEPTION 'পিতার বাংলা নাম আবশ্যক।'; END IF;
+    IF p_mother_name_bn IS NULL OR TRIM(p_mother_name_bn) = '' THEN RAISE EXCEPTION 'মাতার বাংলা নাম আবশ্যক।'; END IF;
+    IF p_date_of_birth IS NULL THEN RAISE EXCEPTION 'জন্ম তারিখ আবশ্যক।'; END IF;
+    IF p_nid_or_birth_cert IS NULL OR TRIM(p_nid_or_birth_cert) = '' THEN RAISE EXCEPTION 'NID বা জন্ম নিবন্ধন নম্বর আবশ্যক।'; END IF;
+
+    -- Fetch the specific marhala student count record for slot validation and reg no range
+    SELECT * INTO v_marhala_count_record
+    FROM public.registration_fee_details
+    WHERE collection_id = p_collection_id
+      AND marhala_id = p_marhala_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'এই ফি সংগ্রহ (%s) এবং মারহালার (%s) জন্য কোনো শিক্ষার্থীর সংখ্যার তথ্য পাওয়া যায়নি।', p_collection_id, p_marhala_id;
+    END IF;
+    
+    IF v_marhala_count_record.registration_number_range_start IS NULL OR v_marhala_count_record.registration_number_range_end IS NULL THEN
+        RAISE EXCEPTION 'মারহালা (%s) এর জন্য নিবন্ধন নম্বর রেঞ্জ নির্ধারণ করা হয়নি। ফি সংগ্রহের সময় এটি সেট করা উচিত ছিলো।', p_marhala_id;
+    END IF;
+
+    -- Count existing examinees for this marhala in this fee collection to check slots
+    SELECT COUNT(*) INTO v_registered_regular_count FROM public.examinees
+    WHERE collection_id = p_collection_id
+      AND marhala_id = p_marhala_id AND student_type = 'regular';
+
+    SELECT COUNT(*) INTO v_registered_irregular_count FROM public.examinees
+    WHERE collection_id = p_collection_id
+      AND marhala_id = p_marhala_id AND student_type = 'irregular';
+
+    IF p_student_type = 'regular' AND v_registered_regular_count >= v_marhala_count_record.regular_students THEN
+        RAISE EXCEPTION 'এই মারহালায় (%s) নিয়মিত পরীক্ষার্থীর জন্য আর কোনো স্লট খালি নেই। মোট স্লট: %, ইতিমধ্যে নিবন্ধিত: %', p_marhala_id, v_marhala_count_record.regular_students, v_registered_regular_count;
+    END IF;
+    IF p_student_type = 'irregular' AND v_registered_irregular_count >= v_marhala_count_record.irregular_students THEN
+        RAISE EXCEPTION 'এই মারহালায় (%s) অনিয়মিত পরীক্ষার্থীর জন্য আর কোনো স্লট খালি নেই। মোট স্লট: %, ইতিমধ্যে নিবন্ধিত: %', p_marhala_id, v_marhala_count_record.irregular_students, v_registered_irregular_count;
+    END IF;
+
+    -- Determine the next available registration number within the marhala's range for this collection
+    SELECT array_agg(registration_number ORDER BY registration_number)
+    INTO v_existing_reg_numbers
+    FROM public.examinees
+    WHERE collection_id = p_collection_id
+      AND marhala_id = p_marhala_id
+      AND registration_number >= v_marhala_count_record.registration_number_range_start
+      AND registration_number <= v_marhala_count_record.registration_number_range_end;
+      
+    v_existing_reg_numbers := COALESCE(v_existing_reg_numbers, '{}'); -- Ensure it's an empty array if null
+
+    v_next_registration_number := NULL;
+    FOR i IN v_marhala_count_record.registration_number_range_start .. v_marhala_count_record.registration_number_range_end LOOP
+        IF NOT (i = ANY(v_existing_reg_numbers)) THEN
+            v_next_registration_number := i;
+            EXIT;
+        END IF;
+    END LOOP;
+
+    IF v_next_registration_number IS NULL THEN
+        RAISE EXCEPTION 'মারহালা (%s) এর জন্য নিবন্ধন নম্বর রেঞ্জে (%s - %s) কোনো খালি স্লট পাওয়া যায়নি। সকল নম্বর ব্যবহৃত হয়েছে।', 
+            p_marhala_id, 
+            v_marhala_count_record.registration_number_range_start, 
+            v_marhala_count_record.registration_number_range_end;
+    END IF;
+    
+    -- Final check for global uniqueness of registration_number within the exam (should be handled by table constraint too)
+    PERFORM 1 FROM public.examinees WHERE exam_id = p_exam_id AND registration_number = v_next_registration_number;
+    IF FOUND THEN
+        RAISE EXCEPTION 'নিবন্ধন নম্বর % ইতিমধ্যে এই পরীক্ষার (%s) জন্য ব্যবহৃত হয়েছে। এটি একটি অপ্রত্যাশিত ত্রুটি, অনুগ্রহ করে সিস্টেম এডমিনের সাথে যোগাযোগ করুন।', v_next_registration_number, p_exam_id
+        USING ERRCODE = '23505'; -- unique_violation
+    END IF;
+
+
+    INSERT INTO public.examinees (
+        collection_id, exam_id, madrasa_id, marhala_id,
+        registration_number, student_type,
+        name_bn, name_ar, name_en,
+        father_name_bn, father_name_ar, father_name_en,
+        mother_name_bn, mother_name_ar, mother_name_en,
+        date_of_birth, nid_or_birth_cert, photo_url,
+        status, registration_input_date, created_at, updated_at,
+        past_year_roll, past_year_marhala, past_exam_year, past_year_total_number, past_year_division, past_year_comment
+    ) VALUES (
+        p_collection_id, p_exam_id, p_madrasa_id, p_marhala_id,
+        v_next_registration_number, p_student_type,
+        p_name_bn, p_name_ar, p_name_en,
+        p_father_name_bn, p_father_name_ar, p_father_name_en,
+        p_mother_name_bn, p_mother_name_ar, p_mother_name_en,
+        p_date_of_birth, p_nid_or_birth_cert, p_photo_url,
+        'fee_pending', NOW(), NOW(), NOW(),
+        p_past_year_roll, p_past_year_marhala, p_past_exam_year, p_past_year_total_number, p_past_year_division, p_past_year_comment
+    ) RETURNING * INTO v_new_examinee;
+
+    RETURN v_new_examinee;
+END;
+$;

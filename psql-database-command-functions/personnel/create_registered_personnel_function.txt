@@ -1,0 +1,109 @@
+
+CREATE OR REPLACE FUNCTION public.create_teacher( 
+    p_name_bn TEXT,
+    p_mobile TEXT,
+    p_nid_number TEXT, 
+    p_date_of_birth DATE,
+    p_gender TEXT,
+    p_educational_qualification_marhala_id UUID, 
+    p_kitabi_qualification_kitab_ids UUID[], 
+    p_name_en TEXT DEFAULT NULL,
+    p_email TEXT DEFAULT NULL,
+    p_photo_url TEXT DEFAULT NULL,
+    p_payment_info JSONB DEFAULT NULL,
+    p_address_details JSONB DEFAULT NULL, -- Keeping existing address_details as it captures "short address" needs
+    p_expertise_areas TEXT[] DEFAULT NULL, -- This was removed from frontend, keeping in DB for now
+    p_notes TEXT DEFAULT NULL
+)
+RETURNS teachers 
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_teacher teachers%ROWTYPE; 
+    v_teacher_code TEXT; 
+    v_last_code_numeric INTEGER;
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'শিক্ষক নিবন্ধনের অনুমতি আপনার নেই।' USING ERRCODE = '42501'; 
+    END IF;
+
+    IF p_name_bn IS NULL OR TRIM(p_name_bn) = '' THEN RAISE EXCEPTION 'বাংলা নাম আবশ্যক।'; END IF;
+    IF p_mobile IS NULL OR TRIM(p_mobile) = '' THEN RAISE EXCEPTION 'মোবাইল নম্বর আবশ্যক।'; END IF;
+    IF NOT (p_mobile ~ '^(01[3-9]\d{8})$') THEN RAISE EXCEPTION 'সঠিক বাংলাদেশী মোবাইল নম্বর দিন (১১ সংখ্যা, 013-019 দিয়ে শুরু)।'; END IF;
+    IF p_nid_number IS NULL OR TRIM(p_nid_number) = '' THEN RAISE EXCEPTION 'NID নম্বর আবশ্যক।'; END IF;
+    IF NOT (p_nid_number ~ '^\d{10}$|^\d{13}$|^\d{17}$') THEN RAISE EXCEPTION 'সঠিক NID নম্বর দিন (১০, ১৩ বা ১৭ সংখ্যার)।'; END IF;
+    IF p_date_of_birth IS NULL THEN RAISE EXCEPTION 'জন্ম তারিখ আবশ্যক।'; END IF;
+    IF p_gender IS NULL OR NOT (p_gender IN ('male', 'female', 'other')) THEN RAISE EXCEPTION 'লিঙ্গ (male/female/other) আবশ্যক।'; END IF;
+    IF p_educational_qualification_marhala_id IS NULL THEN RAISE EXCEPTION 'শিক্ষাগত যোগ্যতা (মারহালা) আবশ্যক।'; END IF;
+    IF p_kitabi_qualification_kitab_ids IS NULL OR array_length(p_kitabi_qualification_kitab_ids, 1) IS NULL OR array_length(p_kitabi_qualification_kitab_ids, 1) = 0 THEN
+        RAISE EXCEPTION 'অন্তত একটি কিতাবী যোগ্যতা নির্বাচন করুন।';
+    END IF;
+    IF p_payment_info IS NULL THEN RAISE EXCEPTION 'পেমেন্ট তথ্য আবশ্যক।'; END IF;
+    IF NOT(p_payment_info ? 'type' AND ((p_payment_info->>'type' = 'mobile' AND p_payment_info ? 'provider' AND p_payment_info ? 'account_number') OR 
+                                     (p_payment_info->>'type' = 'bank' AND p_payment_info ? 'account_name' AND p_payment_info ? 'account_number' AND p_payment_info ? 'bank_name' AND p_payment_info ? 'branch_name'))) THEN
+        RAISE EXCEPTION 'পেমেন্ট তথ্যের ফরম্যাট সঠিক নয়। মোবাইল ব্যাংকিংয়ের জন্য provider ও account_number এবং ব্যাংক একাউন্টের জন্য account_name, account_number, bank_name, branch_name আবশ্যক।';
+    END IF;
+    
+    PERFORM 1 FROM public.teachers WHERE mobile = p_mobile; 
+    IF FOUND THEN RAISE EXCEPTION 'এই মোবাইল নম্বর (%s) দিয়ে ইতিমধ্যে একজন শিক্ষক নিবন্ধিত আছেন।', p_mobile USING ERRCODE = '23505'; END IF; 
+    
+    PERFORM 1 FROM public.teachers WHERE nid_number = p_nid_number; 
+    IF FOUND THEN RAISE EXCEPTION 'এই NID নম্বর (%s) দিয়ে ইতিমধ্যে একজন শিক্ষক নিবন্ধিত আছেন।', p_nid_number USING ERRCODE = '23505'; END IF; 
+    
+    IF p_email IS NOT NULL AND TRIM(p_email) <> '' THEN
+      PERFORM 1 FROM public.teachers WHERE email = p_email; 
+      IF FOUND THEN RAISE EXCEPTION 'এই ইমেইল (%s) দিয়ে ইতিমধ্যে একজন শিক্ষক নিবন্ধিত আছেন।', p_email USING ERRCODE = '23505'; END IF; 
+    END IF;
+
+    PERFORM 1 FROM public.marhalas WHERE id = p_educational_qualification_marhala_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'নির্বাচিত শিক্ষাগত যোগ্যতা (মারহালা আইডি: %) সঠিক নয়।', p_educational_qualification_marhala_id USING ERRCODE = '23503';
+    END IF;
+
+    DECLARE kitab_id_val UUID;
+    BEGIN
+        FOREACH kitab_id_val IN ARRAY p_kitabi_qualification_kitab_ids
+        LOOP
+            PERFORM 1 FROM public.kitabs WHERE id = kitab_id_val;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'নির্বাচিত কিতাবী যোগ্যতার মধ্যে একটি কিতাব আইডি (%s) সঠিক নয়।', kitab_id_val USING ERRCODE = '23503';
+            END IF;
+        END LOOP;
+    END;
+
+    SELECT COALESCE(MAX(SUBSTRING(teacher_code FROM 'TC(\d+)')::INTEGER), 0) 
+    INTO v_last_code_numeric
+    FROM public.teachers 
+    WHERE teacher_code ~ '^TC\d{4,}$'; 
+    v_teacher_code := 'TC' || LPAD((v_last_code_numeric + 1)::TEXT, 4, '0'); 
+
+    INSERT INTO public.teachers ( 
+        teacher_code, name_bn, name_en, mobile, nid_number, email,
+        date_of_birth, gender, photo_url, payment_info,
+        address_details, 
+        educational_qualification, 
+        kitabi_qualification,    
+        expertise_areas, notes, is_active, registered_by,
+        created_at, updated_at
+    ) VALUES (
+        v_teacher_code, p_name_bn, p_name_en, p_mobile, p_nid_number, p_email,
+        p_date_of_birth, p_gender, p_photo_url, p_payment_info,
+        p_address_details, 
+        p_educational_qualification_marhala_id, 
+        p_kitabi_qualification_kitab_ids,    
+        p_expertise_areas, p_notes, TRUE, v_current_user_id,
+        NOW(), NOW()
+    ) RETURNING * INTO v_new_teacher; 
+
+    RETURN v_new_teacher; 
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_teacher( 
+    TEXT, TEXT, TEXT, DATE, TEXT, UUID, UUID[], TEXT, TEXT, TEXT, JSONB, JSONB, TEXT[], TEXT
+) TO authenticated;
+    

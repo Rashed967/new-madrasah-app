@@ -1,0 +1,7 @@
+-- Create a custom type to define the structure for mark records used in RPC functions.
+-- This resolves the "could not determine row type for result of jsonb_populate_record" error
+-- by providing an explicit record type instead of a generic one.
+CREATE TYPE public.mark_record_type AS (
+    obtained_marks INTEGER,
+    status TEXT
+);

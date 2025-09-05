@@ -1,0 +1,72 @@
+
+CREATE OR REPLACE FUNCTION public.assign_madrasa_marhala_to_markaz_exam(
+    p_markaz_id UUID,
+    p_exam_id UUID,
+    p_madrasa_id UUID,
+    p_marhala_id UUID
+)
+RETURNS public.markaz_madrasa_marhala_assignments -- Returns the new assignment row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_assignment public.markaz_madrasa_marhala_assignments%ROWTYPE;
+    v_user_role TEXT;
+    v_current_user_id UUID;
+    v_markaz_capacity INTEGER;
+    v_current_examinees_at_markaz_for_exam INTEGER;
+    v_examinees_for_this_assignment INTEGER;
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'মারকাযে মাদরাসা/মারহালা এসাইন করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Validate inputs
+    IF p_markaz_id IS NULL OR p_exam_id IS NULL OR p_madrasa_id IS NULL OR p_marhala_id IS NULL THEN
+        RAISE EXCEPTION 'মারকায, পরীক্ষা, মাদরাসা এবং মারহালা আইডি সবগুলোই আবশ্যক।';
+    END IF;
+
+    -- Validate foreign keys (optional, as DB constraints will catch it, but good for early error)
+    PERFORM 1 FROM public.markazes WHERE id = p_markaz_id AND is_active = TRUE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'সક્રિય মারকায আইডি (%) পাওয়া যায়নি।', p_markaz_id; END IF;
+    
+    -- PERFORM 1 FROM public.exams WHERE id = p_exam_id AND is_active = TRUE; -- Uncomment when exams table is ready
+    -- IF NOT FOUND THEN RAISE EXCEPTION 'সক্রিয় পরীক্ষা আইডি (%) পাওয়া যায়নি।', p_exam_id; END IF;
+
+    PERFORM 1 FROM public.madrasas WHERE id = p_madrasa_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'মাদরাসা আইডি (%) পাওয়া যায়নি।', p_madrasa_id; END IF;
+
+    PERFORM 1 FROM public.marhalas WHERE id = p_marhala_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'মারহালা আইডি (%) পাওয়া যায়নি।', p_marhala_id; END IF;
+
+    -- Check markaz capacity (Optional: User wants warning only, so this logic might be for UI or a non-blocking warning)
+    -- This example shows how one might check it.
+    /*
+    SELECT examinee_capacity INTO v_markaz_capacity FROM public.markazes WHERE id = p_markaz_id;
+    
+    -- Calculate current assigned examinees to this markaz for this exam (this is complex and depends on how examinees are counted)
+    -- For simplicity, this part is illustrative and needs a proper way to count examinees.
+    -- SELECT COALESCE(SUM(number_of_students_in_marhala), 0) INTO v_current_examinees_at_markaz_for_exam 
+    -- FROM some_table_or_function_calculating_students(p_markaz_id, p_exam_id);
+    -- SELECT count_examinees_for_madrasa_marhala_exam(p_madrasa_id, p_marhala_id, p_exam_id) INTO v_examinees_for_this_assignment;
+    -- IF v_current_examinees_at_markaz_for_exam + v_examinees_for_this_assignment > v_markaz_capacity THEN
+    --    RAISE WARNING 'এই এসাইনমেন্টটি মারকাযের ধারণক্ষমতা (%) অতিক্রম করবে। বর্তমানে পরীক্ষার্থী: %, এই এসাইনমেন্টে: %', 
+    --                  v_markaz_capacity, v_current_examinees_at_markaz_for_exam, v_examinees_for_this_assignment;
+    --    -- To strictly enforce: RAISE EXCEPTION ...
+    -- END IF;
+    */
+
+    INSERT INTO public.markaz_madrasa_marhala_assignments (markaz_id, exam_id, madrasa_id, marhala_id)
+    VALUES (p_markaz_id, p_exam_id, p_madrasa_id, p_marhala_id)
+    ON CONFLICT (exam_id, madrasa_id, marhala_id) DO UPDATE 
+    SET markaz_id = EXCLUDED.markaz_id, updated_at = NOW() -- If it exists, update the markaz_id (effectively re-assigning)
+    RETURNING * INTO v_new_assignment;
+
+    RETURN v_new_assignment;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.assign_madrasa_marhala_to_markaz_exam(UUID, UUID, UUID, UUID) TO authenticated;

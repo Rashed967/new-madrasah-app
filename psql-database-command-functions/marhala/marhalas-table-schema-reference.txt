@@ -1,0 +1,43 @@
+
+-- handle_updated_at ফাংশন (যদি আগে তৈরি না হয়ে থাকে)
+CREATE OR REPLACE FUNCTION public.handle_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- মারহালা টেবিল
+CREATE TABLE IF NOT EXISTS public.marhalas (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    marhala_code TEXT UNIQUE NOT NULL,
+    name_bn TEXT UNIQUE NOT NULL,
+    name_ar TEXT,
+    type TEXT NOT NULL CHECK (type IN ('boys', 'girls')),
+    category TEXT NOT NULL CHECK (category IN ('darsiyat', 'hifz')),
+    kitab_ids UUID[] DEFAULT ARRAY[]::UUID[],
+    marhala_order INTEGER, 
+    requires_photo BOOLEAN DEFAULT FALSE NOT NULL, -- Added for photo requirement
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+-- marhala_order কলামে UNIQUE constraint যোগ করতে পারেন যদি প্রতিটি অর্ডার নম্বর স্বতন্ত্র হতে হয়,
+-- তবে auto-incrementing order এর জন্য সাধারণত এটি প্রয়োজন হয় না, অথবা লজিক ভিন্নভাবে হ্যান্ডেল করতে হয়।
+-- ALTER TABLE public.marhalas ADD CONSTRAINT marhalas_marhala_order_key UNIQUE (marhala_order);
+
+
+-- updated_at কলামের জন্য ট্রিগার (যদি handle_updated_at ফাংশনটি আগে তৈরি না থাকে)
+DROP TRIGGER IF EXISTS on_marhalas_updated ON public.marhalas; 
+CREATE TRIGGER on_marhalas_updated
+BEFORE UPDATE ON public.marhalas
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS পলিসি (উদাহরণ)
+-- ALTER TABLE public.marhalas ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow all access to authenticated users for marhalas" ON public.marhalas
+-- FOR ALL TO authenticated USING (true) WITH CHECK (true);
+-- CREATE POLICY "Allow read access to anon users for marhalas" ON public.marhalas
+-- FOR SELECT TO anon USING (true);

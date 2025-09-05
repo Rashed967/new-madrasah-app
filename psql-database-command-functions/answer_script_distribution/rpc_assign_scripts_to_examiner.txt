@@ -1,0 +1,85 @@
+
+CREATE OR REPLACE FUNCTION public.assign_scripts_to_examiner(
+    p_exam_id UUID,
+    p_markaz_id UUID,
+    p_kitab_id UUID,
+    p_examiner_teacher_id UUID,
+    p_distribution_date TIMESTAMPTZ,
+    p_examinee_ids UUID[] -- Array of examinee IDs to assign
+)
+RETURNS JSONB -- { distribution_id: UUID, assigned_count: INTEGER }
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_distribution_id UUID;
+    v_user_id UUID := auth.uid();
+    v_examinee_id_current UUID;
+    v_roll_number_current INTEGER;
+    v_assigned_count INTEGER := 0;
+    v_user_role TEXT;
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'উত্তরপত্র বন্টনের অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_examinee_ids IS NULL OR array_length(p_examinee_ids, 1) IS NULL OR array_length(p_examinee_ids, 1) = 0 THEN
+        RAISE EXCEPTION 'অন্তত একজন পরীক্ষার্থী নির্বাচন করতে হবে।';
+    END IF;
+    
+    -- Create the main distribution record
+    INSERT INTO public.answer_script_distributions (
+        exam_id, markaz_id, kitab_id, examiner_teacher_id, distribution_date,
+        assigned_total_scripts_count, created_by_user_id
+    ) VALUES (
+        p_exam_id, p_markaz_id, p_kitab_id, p_examiner_teacher_id, p_distribution_date,
+        array_length(p_examinee_ids, 1), v_user_id
+    ) RETURNING id INTO v_distribution_id;
+
+    -- Insert details for each examinee
+    FOREACH v_examinee_id_current IN ARRAY p_examinee_ids
+    LOOP
+        -- Fetch roll number for denormalization
+        SELECT roll_number INTO v_roll_number_current 
+        FROM public.examinees 
+        WHERE id = v_examinee_id_current;
+
+        INSERT INTO public.distributed_script_details (
+            distribution_id, examinee_id, exam_id, kitab_id, roll_number
+        ) VALUES (
+            v_distribution_id, v_examinee_id_current, p_exam_id, p_kitab_id, v_roll_number_current
+        );
+        v_assigned_count := v_assigned_count + 1;
+
+        UPDATE public.examinees
+        SET status = 'script_distributed'
+        WHERE id = v_examinee_id_current AND status = 'roll_assigned';
+    END LOOP;
+
+    RETURN jsonb_build_object('distribution_id', v_distribution_id, 'assigned_count', v_assigned_count);
+EXCEPTION
+    WHEN unique_violation THEN
+        -- Check if it's the unique_examinee_script_assignment constraint from distributed_script_details
+        IF SQLERRM LIKE '%unique_examinee_script_assignment%' THEN
+            RAISE EXCEPTION 'এক বা একাধিক নির্বাচিত পরীক্ষার্থীর উত্তরপত্র এই বিষয় (%s) ও পরীক্ষার (%s) জন্য ইতিমধ্যে অন্য কোনো পরীক্ষককে বন্টন করা হয়েছে।', 
+            (SELECT name_bn FROM public.kitabs WHERE id = p_kitab_id), 
+            (SELECT name FROM public.exams WHERE id = p_exam_id)
+            USING HINT = 'অনুগ্রহ করে তালিকাটি রিফ্রেশ করে আবার চেষ্টা করুন।';
+        -- Check if it's the uq_exam_markaz_kitab_examiner_dist constraint from answer_script_distributions
+        ELSIF SQLERRM LIKE '%uq_exam_markaz_kitab_examiner_dist%' THEN
+             RAISE EXCEPTION 'এই পরীক্ষক (%s) ইতিমধ্যে এই পরীক্ষা (%s), মারকায (%s) এবং কিতাবের (%s) জন্য উত্তরপত্র পেয়েছেন। একটি নতুন বন্টন তৈরি করতে, অনুগ্রহ করে ভিন্ন পরীক্ষক বা প্রেক্ষাপট নির্বাচন করুন, অথবা পূর্বের বন্টনটি পরিবর্তন করুন।',
+                (SELECT name_bn FROM public.teachers WHERE id = p_examiner_teacher_id),
+                (SELECT name FROM public.exams WHERE id = p_exam_id),
+                (SELECT name_bn FROM public.markazes WHERE id = p_markaz_id),
+                (SELECT name_bn FROM public.kitabs WHERE id = p_kitab_id)
+            USING HINT = 'একই পরীক্ষককে একই পরীক্ষা, মারকায, ও কিতাবের জন্য একাধিকবার বন্টন করা যাবে না যদি না পূর্বের বন্টনটি মুছে ফেলা হয়।';
+        ELSE
+            RAISE; -- Re-raise other unique violations
+        END IF;
+    WHEN others THEN
+        RAISE; -- Re-raise any other errors
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.assign_scripts_to_examiner(UUID, UUID, UUID, UUID, TIMESTAMPTZ, UUID[]) TO authenticated;

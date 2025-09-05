@@ -1,0 +1,33 @@
+
+CREATE OR REPLACE FUNCTION public.get_distribution_examinee_details(
+    p_distribution_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_roll_numbers JSONB;
+    v_madrasa_names JSONB;
+BEGIN
+    -- Get roll numbers
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('roll_number', dsd.roll_number) ORDER BY dsd.roll_number ASC), '[]'::jsonb)
+    INTO v_roll_numbers
+    FROM public.distributed_script_details dsd
+    WHERE dsd.distribution_id = p_distribution_id;
+
+    -- Get madrasa names from the main distribution record's madrasa_ids array
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('name_bn', m.name_bn) ORDER BY m.name_bn), '[]'::jsonb)
+    INTO v_madrasa_names
+    FROM public.madrasas m
+    JOIN public.answer_script_distributions d ON m.id = ANY(d.madrasa_ids)
+    WHERE d.id = p_distribution_id;
+
+    RETURN jsonb_build_object(
+        'roll_numbers', v_roll_numbers,
+        'madrasa_names', v_madrasa_names
+    );
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_distribution_examinee_details(UUID) TO authenticated;

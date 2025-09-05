@@ -1,0 +1,96 @@
+
+CREATE OR REPLACE FUNCTION public.get_madrasa_results(
+    p_exam_id UUID,
+    p_madrasa_code INTEGER,
+    p_muhtamim_mobile TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+DECLARE
+    v_madrasa_id UUID;
+    v_result JSONB;
+    v_madrasa_record public.madrasas%ROWTYPE;
+BEGIN
+    -- First, find the madrasa by the provided code to give specific feedback.
+    SELECT * INTO v_madrasa_record FROM public.madrasas WHERE madrasa_code = p_madrasa_code;
+
+    -- Check if a madrasa with the given code was found.
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত মাদরাসা কোড (%) খুঁজে পাওয়া যায়নি।', p_madrasa_code;
+    END IF;
+
+    -- Now, check if the provided mobile number matches the found madrasa's mobile numbers.
+    IF p_muhtamim_mobile = v_madrasa_record.mobile1 OR p_muhtamim_mobile = (v_madrasa_record.muhtamim->>'mobile') THEN
+        -- Credentials are valid. Proceed.
+        v_madrasa_id := v_madrasa_record.id;
+    ELSE
+        -- The code was found, but the mobile number does not match.
+        RAISE EXCEPTION 'প্রদত্ত মোবাইল নম্বরটি মাদরাসা কোড (%) এর সাথে মেলে না। অনুগ্রহ করে সঠিক মোবাইল নম্বর দিন।', p_madrasa_code;
+    END IF;
+
+    -- Fetch results if credentials are valid
+    SELECT jsonb_build_object(
+        'summary', (
+            SELECT jsonb_build_object(
+                'total_examinees', COUNT(*),
+                'total_passed', COUNT(*) FILTER (WHERE er.status = 'কৃতকার্য'),
+                'total_failed', COUNT(*) FILTER (WHERE er.status = 'অকৃতকার্য'),
+                'pass_rate', CASE WHEN COUNT(*) > 0 THEN (COUNT(*) FILTER (WHERE er.status = 'কৃতকার্য') * 100.0) / COUNT(*) ELSE 0 END
+            )
+            FROM public.exam_results er
+            JOIN public.examinees ex ON er.examinee_id = ex.id
+            WHERE er.exam_id = p_exam_id AND ex.madrasa_id = v_madrasa_id
+        ),
+        'madrasa_details', (
+            SELECT jsonb_build_object('name_bn', m.name_bn, 'madrasa_code', m.madrasa_code)
+            FROM public.madrasas m WHERE m.id = v_madrasa_id
+        ),
+        'exam_details', (
+            SELECT jsonb_build_object('name', e.name)
+            FROM public.exams e WHERE e.id = p_exam_id
+        ),
+        'results_by_marhala', (
+            WITH madrasa_examinee_results AS (
+                SELECT
+                    ex.marhala_id,
+                    ex.id as examinee_id,
+                    ex.roll_number,
+                    ex.registration_number,
+                    ex.name_bn,
+                    er.total_marks,
+                    er.percentage,
+                    er.grade,
+                    er.status,
+                    ml.position_details,
+                    (
+                        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                            'kitab_name', k.name_bn,
+                            'obtained_marks', m.obtained_marks
+                        ) ORDER BY k.kitab_code), '[]'::jsonb)
+                        FROM public.marks m
+                        JOIN public.kitabs k ON m.kitab_id = k.id
+                        WHERE m.examinee_id = ex.id AND m.exam_id = p_exam_id
+                    ) AS subject_marks
+                FROM public.exam_results er
+                JOIN public.examinees ex ON er.examinee_id = ex.id
+                LEFT JOIN public.merit_lists ml ON er.examinee_id = ml.examinee_id AND er.exam_id = ml.exam_id
+                WHERE er.exam_id = p_exam_id AND ex.madrasa_id = v_madrasa_id
+            )
+            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                'marhala_id', m.id,
+                'marhala_name', m.name_bn,
+                'results', (
+                    SELECT COALESCE(jsonb_agg(mer.* ORDER BY mer.roll_number), '[]'::jsonb)
+                    FROM madrasa_examinee_results mer
+                    WHERE mer.marhala_id = m.id
+                )
+            ) ORDER BY m.marhala_order), '[]'::jsonb)
+            FROM public.marhalas m
+            WHERE m.id IN (SELECT DISTINCT marhala_id FROM madrasa_examinee_results)
+        )
+    ) INTO v_result;
+
+    RETURN v_result;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_madrasa_results(UUID, INTEGER, TEXT) TO authenticated, anon;

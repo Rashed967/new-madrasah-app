@@ -1,0 +1,112 @@
+
+CREATE OR REPLACE FUNCTION public.create_exam_personnel_assignment(
+    p_exam_id UUID,
+    p_personnel_id UUID,
+    p_assigned_role TEXT,
+    p_markaz_id UUID DEFAULT NULL, 
+    p_negran_type TEXT DEFAULT NULL
+)
+RETURNS exam_personnel_assignments
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_assignment exam_personnel_assignments%ROWTYPE;
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+    v_effective_markaz_id UUID;
+    v_effective_assigned_marhala_id UUID; -- Will always be NULL based on new rules
+    v_effective_negran_type TEXT;
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'শিক্ষক নিয়োগের অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_exam_id IS NULL THEN RAISE EXCEPTION 'পরীক্ষা আইডি আবশ্যক।'; END IF;
+    IF p_personnel_id IS NULL THEN RAISE EXCEPTION 'শিক্ষক আইডি আবশ্যক।'; END IF;
+    IF p_assigned_role IS NULL OR NOT (p_assigned_role IN ('mumtahin', 'negran')) THEN
+        RAISE EXCEPTION 'নির্ধারিত ভূমিকা অবশ্যই ''mumtahin'' অথবা ''negran'' হতে হবে।';
+    END IF;
+
+    v_effective_assigned_marhala_id := NULL; -- Always NULL based on new rules
+
+    IF p_assigned_role = 'mumtahin' THEN
+        v_effective_markaz_id := NULL;
+        v_effective_negran_type := NULL;
+        IF p_markaz_id IS NOT NULL THEN 
+            RAISE WARNING 'মুমতাহিনকে একটি নির্দিষ্ট মারকাযে এসাইন করা হচ্ছে না। মারকায আইডি (%s) উপেক্ষা করা হবে।', p_markaz_id;
+        END IF;
+        IF p_negran_type IS NOT NULL THEN
+             RAISE WARNING 'মুমতাহিনের জন্য নেগরানের ধরণ (%s) প্রযোজ্য নয় এবং উপেক্ষা করা হবে।', p_negran_type;
+        END IF;
+    ELSIF p_assigned_role = 'negran' THEN
+        IF p_markaz_id IS NULL THEN
+            RAISE EXCEPTION 'নেগরান অবশ্যই একটি মারকাযের অধীনে হতে হবে। মারকায আইডি আবশ্যক।';
+        END IF;
+        v_effective_markaz_id := p_markaz_id;
+        
+        IF p_negran_type IS NULL OR NOT (p_negran_type IN ('head', 'assistant')) THEN
+            RAISE EXCEPTION 'নেগরানের জন্য ধরণ (head/assistant) আবশ্যক।';
+        END IF;
+        v_effective_negran_type := p_negran_type;
+
+        IF v_effective_negran_type = 'head' THEN
+            PERFORM 1 FROM public.exam_personnel_assignments
+            WHERE exam_id = p_exam_id
+              AND markaz_id = v_effective_markaz_id
+              AND assigned_role = 'negran'
+              AND negran_type = 'head'
+              AND personnel_id <> p_personnel_id; 
+            IF FOUND THEN
+                RAISE EXCEPTION 'এই পরীক্ষা ও মারকাযে (%s) ইতিমধ্যে একজন প্রধান নেগরান (%s) নিয়োজিত আছেন।', 
+                    (SELECT name_bn FROM public.markazes WHERE id = v_effective_markaz_id LIMIT 1),
+                    (SELECT name_bn FROM public.teachers t JOIN public.exam_personnel_assignments epa_inner ON t.id = epa_inner.personnel_id WHERE epa_inner.exam_id = p_exam_id AND epa_inner.markaz_id = v_effective_markaz_id AND epa_inner.negran_type = 'head' AND epa_inner.personnel_id <> p_personnel_id LIMIT 1)
+                USING ERRCODE = 'P0001'; -- Custom error code for specific business logic
+            END IF;
+        END IF;
+    ELSE 
+        RAISE EXCEPTION 'অজানা ভূমিকা: %', p_assigned_role;
+    END IF;
+
+    -- Validate foreign keys
+    PERFORM 1 FROM public.exams WHERE id = p_exam_id AND is_active = TRUE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'সক্রিয় পরীক্ষা আইডি (%) খুঁজে পাওয়া যায়নি।', p_exam_id USING ERRCODE = '23503'; END IF;
+
+    IF v_effective_markaz_id IS NOT NULL THEN 
+        PERFORM 1 FROM public.markazes WHERE id = v_effective_markaz_id AND is_active = TRUE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'সক্রিয় মারকায আইডি (%) খুঁজে পাওয়া যায়নি।', v_effective_markaz_id USING ERRCODE = '23503'; END IF;
+    END IF;
+    
+    PERFORM 1 FROM public.teachers WHERE id = p_personnel_id AND is_active = TRUE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'সক্রিয় শিক্ষক আইডি (%) খুঁজে পাওয়া যায়নি।', p_personnel_id USING ERRCODE = '23503'; END IF;
+    
+    INSERT INTO public.exam_personnel_assignments (
+        exam_id, markaz_id, personnel_id, assigned_role, assigned_marhala_id, negran_type,
+        created_at, updated_at
+    ) VALUES (
+        p_exam_id, v_effective_markaz_id, p_personnel_id, p_assigned_role, v_effective_assigned_marhala_id, v_effective_negran_type,
+        NOW(), NOW()
+    )
+    ON CONFLICT (exam_id, personnel_id, assigned_role) -- Updated conflict target
+    DO UPDATE SET 
+        markaz_id = EXCLUDED.markaz_id, 
+        assigned_marhala_id = EXCLUDED.assigned_marhala_id, 
+        negran_type = EXCLUDED.negran_type, 
+        updated_at = NOW()
+    RETURNING * INTO v_new_assignment;
+
+    RETURN v_new_assignment;
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'এই শিক্ষক (%s) ইতিমধ্যে এই পরীক্ষার (%s) জন্য এই ভূমিকায় (%s) নিয়োগপ্রাপ্ত আছেন।', 
+            (SELECT name_bn FROM public.teachers WHERE id = p_personnel_id), 
+            (SELECT name FROM public.exams WHERE id = p_exam_id),
+            p_assigned_role
+        USING ERRCODE = '23505', HINT = 'যদি ভূমিকা বা মারকায পরিবর্তন করতে চান, তবে প্রথমে পুরনো নিয়োগটি মুছুন অথবা নিশ্চিত করুন যে ডেটাবেজ কনস্ট্রেইন্টগুলো বর্তমান লজিকের সাথে সামঞ্জস্যপূর্ণ।';
+    WHEN others THEN
+        RAISE WARNING 'Error in create_exam_personnel_assignment: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.create_exam_personnel_assignment(UUID, UUID, TEXT, UUID, TEXT) TO authenticated;

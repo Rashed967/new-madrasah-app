@@ -1,0 +1,101 @@
+
+CREATE OR REPLACE FUNCTION public.get_madrasas_filtered(
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10,
+    p_search_term TEXT DEFAULT NULL,
+    p_division TEXT DEFAULT NULL,
+    p_district TEXT DEFAULT NULL,
+    p_upazila TEXT DEFAULT NULL,
+    p_type TEXT DEFAULT NULL, -- MadrasaType e.g., 'boys', 'girls', 'both'
+    p_zone_id UUID DEFAULT NULL,
+    p_sort_field TEXT DEFAULT 'madrasa_code',
+    p_sort_order TEXT DEFAULT 'desc' -- 'asc' or 'desc'
+)
+RETURNS jsonb -- Return a JSONB object containing items and totalItems
+LANGUAGE plpgsql
+SECURITY DEFINER -- DEFINER for consistent permissions, ensure it has necessary table access
+AS $$
+DECLARE
+    _query TEXT;
+    _count_query TEXT;
+    _offset INTEGER;
+    _total_items INTEGER;
+    _items jsonb;
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    -- Base query
+    _query := 'SELECT m.* FROM public.madrasas m WHERE TRUE';
+
+    -- Search term filter
+    IF p_search_term IS NOT NULL AND p_search_term <> '' THEN
+        DECLARE
+            search_array TEXT[];
+            search_part TEXT;
+            search_conditions TEXT[];
+            i INTEGER;
+        BEGIN
+            search_array := string_to_array(trim(p_search_term), ' ');
+            IF array_length(search_array, 1) > 0 THEN
+                FOR i IN 1..array_length(search_array, 1) LOOP
+                    search_part := search_array[i];
+                    -- Add individual conditions for each part
+                                        search_conditions := array_append(search_conditions, 
+                        format('(m.name_bn ILIKE %1$L OR m.name_ar ILIKE %1$L OR CAST(m.madrasa_code AS TEXT) ILIKE %1$L OR m.mobile1 ILIKE %1$L)', '%%' || search_part || '%%')
+                    );
+                END LOOP;
+                _query := _query || ' AND (' || array_to_string(search_conditions, ' OR ') || ')';
+            END IF;
+        END;
+    END IF;
+    
+    -- Location filters
+    IF p_division IS NOT NULL AND p_division <> '' THEN
+        _query := _query || format(' AND (m.address->>''division'' = %L)', p_division);
+    END IF;
+    IF p_district IS NOT NULL AND p_district <> '' THEN
+        _query := _query || format(' AND (m.address->>''district'' = %L)', p_district);
+    END IF;
+    IF p_upazila IS NOT NULL AND p_upazila <> '' THEN
+        _query := _query || format(' AND (m.address->>''upazila'' = %L)', p_upazila);
+    END IF;
+    
+    -- Type filter
+    IF p_type IS NOT NULL AND p_type <> '' THEN
+        _query := _query || format(' AND m.type = %L', p_type);
+    END IF;
+    
+    -- Zone filter
+    IF p_zone_id IS NOT NULL THEN
+        _query := _query || format(' AND m.zone_id = %L', p_zone_id);
+    END IF;
+
+    -- Get total count based on the filtered query
+    _count_query := 'SELECT COUNT(*) FROM (' || _query || ') AS filtered_count_subquery';
+    EXECUTE _count_query INTO _total_items;
+
+    -- Add sorting (validate sort field to prevent SQL injection)
+    IF p_sort_field IS NOT NULL AND p_sort_field <> '' AND
+       (lower(p_sort_order) = 'asc' OR lower(p_sort_order) = 'desc') THEN -- Corrected line: removed extra parenthesis
+        IF p_sort_field = 'madrasa_code' OR p_sort_field = 'name_bn' THEN -- Whitelist allowed sort fields
+             _query := _query || format(' ORDER BY m.%I %s', p_sort_field, p_sort_order);
+        ELSE -- Default sort if field is not recognized
+             _query := _query || ' ORDER BY m.madrasa_code DESC';
+        END IF;
+    ELSE
+        _query := _query || ' ORDER BY m.madrasa_code DESC'; -- Default sort
+    END IF;
+
+    -- Add pagination
+    _query := _query || format(' LIMIT %L OFFSET %L', p_limit, _offset);
+    
+    -- Get items as JSON array
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _query || ') q' INTO _items;
+    
+    RETURN jsonb_build_object('items', _items, 'totalItems', _total_items);
+END;
+$$;
+
+-- Grant execute permission to the authenticated role
+GRANT EXECUTE ON FUNCTION public.get_madrasas_filtered(INTEGER, INTEGER, TEXT, TEXT, TEXT, TEXT, TEXT, UUID, TEXT, TEXT) TO authenticated;
+    

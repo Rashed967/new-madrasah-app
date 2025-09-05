@@ -1,0 +1,171 @@
+-- Function: public.process_exam_results
+-- Purpose: Calculates total marks, percentage, grade, and status for all eligible examinees of an exam.
+--          Also generates the merit list for each marhala within that exam.
+
+CREATE OR REPLACE FUNCTION public.process_exam_results(p_exam_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_examinee RECORD;
+    v_examinee_marks JSONB;
+    v_marhala_kitab_ids UUID[];
+    v_kitab_id UUID;
+    v_kitab_mark_record public.mark_record_type; -- Use the custom type
+    v_full_marks INTEGER;
+    v_total_marks INTEGER;
+    v_total_full_marks INTEGER;
+    v_is_fail BOOLEAN;
+    v_percentage NUMERIC;
+    v_grade TEXT;
+    v_status TEXT;
+    v_processed_count INTEGER := 0;
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+BEGIN
+    -- Authorization check
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'ফলাফল প্রস্তুত করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Step 1: Clean up existing results for this exam to ensure idempotency
+    DELETE FROM public.merit_lists WHERE exam_id = p_exam_id;
+    DELETE FROM public.exam_results WHERE exam_id = p_exam_id;
+
+    -- Step 2: Loop through each examinee of the exam whose marks are fully entered and process their results
+    FOR v_examinee IN
+        SELECT ex.id, ex.marhala_id
+        FROM public.examinees ex
+        WHERE ex.exam_id = p_exam_id AND ex.status = 'Completed' -- **CRITICAL CHANGE**: Only process 'Completed' examinees
+    LOOP
+        v_total_marks := 0;
+        v_total_full_marks := 0;
+        v_is_fail := FALSE;
+
+        -- Get all marks for this specific examinee
+        SELECT jsonb_object_agg(em.kitab_id, jsonb_build_object('obtained_marks', em.obtained_marks, 'status', em.status))
+        INTO v_examinee_marks
+        FROM public.marks em
+        WHERE em.examinee_id = v_examinee.id AND em.exam_id = p_exam_id;
+
+        -- Get all kitab IDs for this examinee's marhala
+        SELECT kitab_ids INTO v_marhala_kitab_ids
+        FROM public.marhalas
+        WHERE id = v_examinee.marhala_id;
+
+        -- Loop through marhala's kitabs to calculate total and check for failures
+        FOREACH v_kitab_id IN ARRAY COALESCE(v_marhala_kitab_ids, ARRAY[]::UUID[])
+        LOOP
+            v_kitab_mark_record := NULL;
+            -- Find the mark for the current kitab from the examinee's pre-fetched marks
+            IF v_examinee_marks IS NOT NULL AND v_examinee_marks ? v_kitab_id::text THEN
+                v_kitab_mark_record := jsonb_populate_record(null::public.mark_record_type, v_examinee_marks->v_kitab_id::text); -- Use the custom type
+            END IF;
+
+            SELECT full_marks INTO v_full_marks FROM public.kitabs WHERE id = v_kitab_id;
+            IF v_full_marks IS NULL THEN 
+                RAISE WARNING 'Kitab ID % for Marhala ID % not found in kitabs table.', v_kitab_id, v_examinee.marhala_id;
+                CONTINUE;
+            END IF;
+
+            -- Check for failure conditions
+            IF v_kitab_mark_record IS NULL OR (v_kitab_mark_record.status <> 'present') THEN
+                v_is_fail := TRUE; -- Missing subject, absent, or expelled is a failure
+            ELSE
+                v_total_marks := v_total_marks + v_kitab_mark_record.obtained_marks;
+                -- Fail if marks are less than 33%
+                IF (v_kitab_mark_record.obtained_marks::NUMERIC / v_full_marks) * 100 < 33 THEN
+                    v_is_fail := TRUE;
+                END IF;
+            END IF;
+            
+            v_total_full_marks := v_total_full_marks + v_full_marks;
+        END LOOP;
+
+        -- Determine final status and grade
+        IF v_is_fail OR v_total_full_marks = 0 THEN -- Also fail if no subjects
+            v_status := 'অকৃতকার্য';
+            v_grade := 'রাসিব';
+            v_percentage := 0;
+        ELSE
+            v_status := 'কৃতকার্য';
+            v_percentage := (v_total_marks::NUMERIC / v_total_full_marks) * 100;
+
+            -- Grade Calculation Logic
+            v_grade := CASE
+                WHEN v_percentage >= 80 THEN 'মুমতায (স্টারমার্ক)'
+                WHEN v_percentage >= 65 THEN 'জায়্যিদ জিদ্দান (১ম বিভাগ)'
+                WHEN v_percentage >= 50 THEN 'জায়্যিদ (২য় বিভাগ)'
+                ELSE 'মাকবুল (৩য় বিভাগ)'
+            END;
+        END IF;
+
+        -- Insert the final result for the examinee
+        INSERT INTO public.exam_results (exam_id, examinee_id, total_marks, percentage, grade, status)
+        VALUES (p_exam_id, v_examinee.id, v_total_marks, v_percentage, v_grade, v_status);
+        
+        v_processed_count := v_processed_count + 1;
+    END LOOP;
+
+    -- Step 3: Generate Merit List for each Marhala
+    INSERT INTO public.merit_lists (exam_id, marhala_id, examinee_id, "rank", position_details, total_marks, percentage, grade)
+    WITH ranked_examinees AS (
+        SELECT
+            er.exam_id,
+            ex.marhala_id,
+            er.examinee_id,
+            er.total_marks,
+            er.percentage,
+            er.grade,
+            DENSE_RANK() OVER (PARTITION BY ex.marhala_id ORDER BY er.total_marks DESC) as rank_num,
+            ROW_NUMBER() OVER (PARTITION BY ex.marhala_id, er.total_marks ORDER BY ex.registration_number ASC) as sub_rank,
+            COUNT(*) OVER (PARTITION BY ex.marhala_id, er.total_marks) as tie_count
+        FROM
+            public.exam_results er
+        JOIN
+            public.examinees ex ON er.examinee_id = ex.id
+        WHERE
+            er.exam_id = p_exam_id
+            AND er.status = 'কৃতকার্য'
+    )
+    SELECT
+        re.exam_id,
+        re.marhala_id,
+        re.examinee_id,
+        re.rank_num,
+        CASE
+            WHEN re.tie_count > 1 THEN
+                re.rank_num::TEXT ||
+                (
+                    CASE re.sub_rank
+                        WHEN 1 THEN ' (ক)'
+                        WHEN 2 THEN ' (খ)'
+                        WHEN 3 THEN ' (গ)'
+                        WHEN 4 THEN ' (ঘ)'
+                        WHEN 5 THEN ' (ঙ)'
+                        WHEN 6 THEN ' (চ)'
+                        WHEN 7 THEN ' (ছ)'
+                        WHEN 8 THEN ' (জ)'
+                        WHEN 9 THEN ' (ঝ)'
+                        WHEN 10 THEN ' (ঞ)'
+                        ELSE ' (' || re.sub_rank::TEXT || ')'
+                    END
+                )
+            ELSE re.rank_num::TEXT
+        END as position_details,
+        re.total_marks,
+        re.percentage,
+        re.grade
+    FROM
+        ranked_examinees re;
+
+    RETURN jsonb_build_object('success', true, 'message', v_processed_count || ' জন পরীক্ষার্থীর ফলাফল প্রস্তুত করা হয়েছে।');
+EXCEPTION
+    WHEN others THEN
+        RAISE WARNING 'Error in process_exam_results: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RETURN jsonb_build_object('success', false, 'message', 'একটি অপ্রত্যাশিত ত্রুটি ঘটেছে: ' || SQLERRM);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.process_exam_results(UUID) TO authenticated;

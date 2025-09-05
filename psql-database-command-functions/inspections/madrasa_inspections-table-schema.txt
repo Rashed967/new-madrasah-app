@@ -1,0 +1,49 @@
+-- Helper function to calculate total from the 'fees' JSONB array.
+-- This is required because generated columns cannot contain subqueries directly.
+CREATE OR REPLACE FUNCTION public.calculate_total_from_fees_jsonb(p_fees JSONB)
+RETURNS NUMERIC(10, 2)
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+  SELECT COALESCE(SUM((fee_item->>'amount')::NUMERIC), 0)
+  FROM jsonb_array_elements(COALESCE(p_fees, '[]'::jsonb)) AS fee_item;
+$$;
+
+COMMENT ON FUNCTION public.calculate_total_from_fees_jsonb(JSONB) IS 'Calculates the sum of "amount" fields from a JSONB array of fee objects. Used for generated columns.';
+
+
+CREATE TABLE IF NOT EXISTS public.madrasa_inspections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    madrasa_id UUID NOT NULL REFERENCES public.madrasas(id) ON DELETE RESTRICT,
+    inspection_date DATE NOT NULL,
+    inspector_name TEXT NOT NULL,
+    comments TEXT,
+    fees JSONB,
+    total_fee NUMERIC(10, 2) NOT NULL GENERATED ALWAYS AS (public.calculate_total_from_fees_jsonb(fees)) STORED,
+    created_by UUID REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+COMMENT ON TABLE public.madrasa_inspections IS 'Stores reports from madrasa inspections.';
+COMMENT ON COLUMN public.madrasa_inspections.fees IS 'Array of fee objects, e.g., [{"type": "পরিদর্শন ফি", "amount": 500}]';
+COMMENT ON COLUMN public.madrasa_inspections.total_fee IS 'Automatically calculated total fee from the fees JSONB array using the calculate_total_from_fees_jsonb function.';
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_madrasa_inspections_updated ON public.madrasa_inspections;
+CREATE TRIGGER on_madrasa_inspections_updated
+BEFORE UPDATE ON public.madrasa_inspections
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies
+ALTER TABLE public.madrasa_inspections ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow admin full access for madrasa_inspections"
+ON public.madrasa_inspections
+FOR ALL TO authenticated
+USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+ALTER TABLE public.madrasa_inspections
+ADD COLUMN exam_id UUID REFERENCES public.exams(id) ON DELETE SET NULL;

@@ -1,0 +1,74 @@
+
+CREATE OR REPLACE FUNCTION public.get_data_for_markaz_entry(
+    p_exam_id UUID,
+    p_markaz_id UUID,
+    p_marhala_id UUID
+)
+RETURNS JSONB -- Returns { examinees: [...], kitabs: [...] }
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    _examinees JSONB;
+    _kitabs JSONB;
+BEGIN
+    -- Get all applicable kitabs for the marhala
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'id', k.id,
+            'name_bn', k.name_bn,
+            'full_marks', k.full_marks
+        ) ORDER BY k.kitab_code
+    ), '[]'::jsonb)
+    INTO _kitabs
+    FROM public.kitabs k
+    WHERE k.id = ANY (SELECT unnest(m.kitab_ids) FROM public.marhalas m WHERE m.id = p_marhala_id);
+
+    -- Get all examinees for the markaz and marhala, and join with their existing marks
+    WITH examinees_in_scope AS (
+        SELECT 
+            ex.id as examinee_id, 
+            ex.roll_number, 
+            ex.name_bn, 
+            ex.registration_number,
+            mad.name_bn as madrasa_name_bn,
+            mad.madrasa_code
+        FROM public.examinees ex
+        JOIN public.markaz_madrasa_marhala_assignments mma 
+            ON ex.madrasa_id = mma.madrasa_id 
+            AND ex.exam_id = mma.exam_id 
+            AND ex.marhala_id = mma.marhala_id
+        JOIN public.madrasas mad ON ex.madrasa_id = mad.id
+        WHERE ex.exam_id = p_exam_id
+          AND ex.marhala_id = p_marhala_id
+          AND mma.markaz_id = p_markaz_id
+          AND ex.status IN ('roll_assigned', 'script_distributed', 'marks_entry_phase', 'Completed') -- Include completed to allow editing
+    )
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'examinee_id', eis.examinee_id,
+            'roll_number', eis.roll_number,
+            'name_bn', eis.name_bn,
+            'registration_number', eis.registration_number,
+            'madrasa_name_bn', eis.madrasa_name_bn,
+            'madrasa_code', eis.madrasa_code,
+            'marks', (
+                SELECT COALESCE(jsonb_object_agg(
+                    m.kitab_id,
+                    jsonb_build_object('value', m.obtained_marks, 'status', m.status)
+                ), '{}'::jsonb)
+                FROM public.marks m
+                WHERE m.examinee_id = eis.examinee_id
+                  AND m.exam_id = p_exam_id
+            )
+        ) ORDER BY eis.roll_number
+    ), '[]'::jsonb)
+    INTO _examinees
+    FROM examinees_in_scope eis;
+
+    RETURN jsonb_build_object('examinees', _examinees, 'kitabs', _kitabs);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_data_for_markaz_entry(UUID, UUID, UUID) TO authenticated;

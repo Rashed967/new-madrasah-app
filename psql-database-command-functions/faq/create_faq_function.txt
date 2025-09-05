@@ -1,0 +1,27 @@
+-- Step 1: Drop all known potentially conflicting function signatures for create_faq.
+-- The specific signatures are taken from the PostgREST error message.
+-- This ensures a clean slate before creating the consolidated function.
+DROP FUNCTION IF EXISTS public.create_faq(p_question text, p_answer text, p_is_active boolean);
+DROP FUNCTION IF EXISTS public.create_faq(p_question text, p_answer text, p_is_active boolean, p_order_index integer);
+DROP FUNCTION IF EXISTS public.create_faq(p_question text, p_answer text, p_order_index integer, p_is_active boolean);
+
+-- Step 2: Create the single, definitive function for creating FAQs.
+-- This version includes all possible parameters with default values, which avoids ambiguity.
+CREATE OR REPLACE FUNCTION public.create_faq(
+  p_question TEXT,
+  p_answer TEXT,
+  p_is_active BOOLEAN DEFAULT TRUE,
+  p_order_index INTEGER DEFAULT 0 -- Default order_index to 0 if not provided
+)
+RETURNS SETOF faqs -- Returns the newly created row
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  -- The function now inserts a new row using all parameters. If a parameter is
+  -- not provided in the function call, its DEFAULT value will be used.
+  RETURN QUERY
+  INSERT INTO faqs (question, answer, is_active, order_index)
+  VALUES (p_question, p_answer, p_is_active, p_order_index)
+  RETURNING *;
+END;
+$$;

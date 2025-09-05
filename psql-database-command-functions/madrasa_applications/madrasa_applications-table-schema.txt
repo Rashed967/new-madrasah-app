@@ -1,0 +1,37 @@
+
+-- This table is for storing applications for new madrasas.
+-- After approval, data is copied to the main 'madrasas' table.
+
+CREATE TABLE IF NOT EXISTS public.madrasa_applications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name_bn TEXT NOT NULL,
+    name_ar TEXT NOT NULL,
+    name_en TEXT,
+    address JSONB NOT NULL,
+    zone_id UUID, -- Admin will assign this later. Changed from NOT NULL.
+    mobile1 TEXT NOT NULL,
+    mobile2 TEXT,
+    type TEXT NOT NULL,
+    highest_marhala_boys_id UUID,
+    highest_marhala_girls_id UUID,
+    muhtamim JSONB NOT NULL,
+    education_secretary JSONB,
+    mutawalli JSONB,
+    registration_date DATE NOT NULL,
+    ilhak_form_url TEXT, -- This was already nullable, but no longer part of the public form.
+    contact_email TEXT NOT NULL,
+    notes TEXT, -- Notes from the applicant
+    application_status TEXT NOT NULL DEFAULT 'pending' CHECK (application_status IN ('pending', 'approved', 'rejected')),
+    reviewed_by UUID REFERENCES auth.users(id), -- Admin who reviewed it
+    review_notes TEXT, -- Admin's notes for rejection/approval
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+COMMENT ON TABLE public.madrasa_applications IS 'Stores applications from madrasas wishing to gain affiliation.';
+COMMENT ON COLUMN public.madrasa_applications.contact_email IS 'The primary contact email for the madrasa, used for creating the user account upon approval.';
+COMMENT ON COLUMN public.madrasa_applications.application_status IS 'The current status of the application: pending, approved, or rejected.';
+COMMENT ON COLUMN public.madrasa_applications.zone_id IS 'Zone will be assigned by an admin after approval. Nullable at application time.';
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_madrasa_applications_status ON public.madrasa_applications(application_status);
+CREATE INDEX IF NOT EXISTS idx_madrasa_applications_zone_id ON public.madrasa_applications(zone_id);

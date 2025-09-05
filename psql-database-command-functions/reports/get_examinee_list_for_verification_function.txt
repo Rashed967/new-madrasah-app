@@ -1,0 +1,71 @@
+-- Function: public.get_examinee_list_for_verification
+-- Purpose: Retrieves a list of examinees for a specific madrasa and exam, grouped by marhala,
+--          including the assigned markaz code and madrasa details. This is used for generating fee collection forms.
+-- Returns: JSONB object: { madrasa_info: MadrasaDbRow, marhala_groups: MarhalaGroup[] }
+CREATE OR REPLACE FUNCTION public.get_examinee_list_for_verification(p_exam_id UUID, p_madrasa_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+DECLARE
+    v_madrasa_info JSONB;
+    v_marhala_groups JSONB;
+BEGIN
+    IF p_exam_id IS NULL OR p_madrasa_id IS NULL THEN
+        RAISE EXCEPTION 'পরীক্ষা আইডি এবং মাদরাসা আইডি উভয়ই আবশ্যক।';
+    END IF;
+
+    -- Get madrasa info
+    SELECT to_jsonb(m) INTO v_madrasa_info FROM public.madrasas m WHERE m.id = p_madrasa_id;
+    IF v_madrasa_info IS NULL THEN
+        RAISE EXCEPTION 'প্রদত্ত মাদরাসা আইডি (%) খুঁজে পাওয়া যায়নি।', p_madrasa_id;
+    END IF;
+
+    -- Get examinee groups
+    WITH examinees_in_scope AS (
+        SELECT
+            ex.id,
+            ex.registration_number,
+            ex.name_bn,
+            ex.name_ar,
+            ex.father_name_bn,
+            ex.father_name_ar,
+            ex.date_of_birth,
+            ex.marhala_id,
+            mma.markaz_id
+        FROM public.examinees ex
+        JOIN public.markaz_madrasa_marhala_assignments mma
+            ON ex.exam_id = mma.exam_id AND ex.madrasa_id = mma.madrasa_id AND ex.marhala_id = mma.marhala_id
+        WHERE ex.exam_id = p_exam_id AND ex.madrasa_id = p_madrasa_id
+          -- **FIX**: Include verified but pending fee students for fee collection form
+          AND ex.status IN ('fee_pending', 'fee_paid', 'roll_assigned', 'script_distributed', 'correction_requested')
+    )
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'marhala_id', mar.id,
+            'marhala_name_bn', mar.name_bn,
+            'markaz_code', (SELECT mk.markaz_code FROM public.markazes mk WHERE mk.id = (SELECT DISTINCT markaz_id FROM examinees_in_scope WHERE marhala_id = mar.id LIMIT 1)),
+            'examinees', (
+                SELECT COALESCE(jsonb_agg(
+                    jsonb_build_object(
+                        'registration_number', eis.registration_number,
+                        'name_bn', eis.name_bn, 'name_ar', eis.name_ar,
+                        'father_name_bn', eis.father_name_bn, 'father_name_ar', eis.father_name_ar,
+                        'date_of_birth', eis.date_of_birth::text
+                    ) ORDER BY eis.registration_number
+                ), '[]'::jsonb)
+                FROM examinees_in_scope eis
+                WHERE eis.marhala_id = mar.id
+            )
+        ) ORDER BY mar.marhala_order
+    ), '[]'::jsonb)
+    INTO v_marhala_groups
+    FROM public.marhalas mar
+    WHERE mar.id IN (SELECT DISTINCT marhala_id FROM examinees_in_scope);
+
+    RETURN jsonb_build_object(
+        'madrasa_info', v_madrasa_info,
+        'marhala_groups', v_marhala_groups
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_examinee_list_for_verification(UUID, UUID) TO authenticated;

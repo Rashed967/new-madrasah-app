@@ -1,0 +1,57 @@
+CREATE OR REPLACE FUNCTION public.get_assigned_script_batches(
+    p_exam_id UUID,
+    p_examiner_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    result JSONB;
+BEGIN
+    WITH distribution_stats AS (
+        SELECT
+            d.id as distribution_id,
+            d.kitab_id,
+            k.name_bn as kitab_name,
+            k.full_marks,
+            d.marhala_id,
+            m.name_bn as marhala_name,
+            d.markaz_id,
+            mk.name_bn as markaz_name,
+            d.assigned_total_scripts_count,
+            (
+                SELECT COUNT(*)
+                FROM public.marks mrk
+                WHERE mrk.distribution_id = d.id
+            ) AS entered_marks_count
+        FROM public.answer_script_distributions d
+        JOIN public.kitabs k ON d.kitab_id = k.id
+        JOIN public.marhalas m ON d.marhala_id = m.id
+        JOIN public.markazes mk ON d.markaz_id = mk.id
+        WHERE d.exam_id = p_exam_id
+          AND d.examiner_teacher_id = p_examiner_id
+    )
+    SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+            'distribution_id', ds.distribution_id,
+            'kitab_id', ds.kitab_id,
+            'kitab_name', ds.kitab_name,
+            'full_marks', ds.full_marks,
+            'marhala_id', ds.marhala_id,
+            'marhala_name', ds.marhala_name,
+            'markaz_id', ds.markaz_id,
+            'markaz_name', ds.markaz_name,
+            'total_scripts', ds.assigned_total_scripts_count,
+            'entered_marks_count', ds.entered_marks_count
+        ) ORDER BY ds.kitab_name, ds.markaz_name
+    ), '[]'::jsonb)
+    INTO result
+    FROM distribution_stats ds; -- Removed WHERE clause to return all batches
+
+    RETURN result;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_assigned_script_batches(UUID, UUID) TO authenticated;

@@ -1,0 +1,41 @@
+
+-- Ensure the handle_updated_at function exists
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at() ... (if not already created)
+
+CREATE TABLE IF NOT EXISTS public.answer_script_distributions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    exam_id UUID NOT NULL REFERENCES public.exams(id) ON DELETE RESTRICT,
+    marhala_id UUID NOT NULL REFERENCES public.marhalas(id) ON DELETE RESTRICT, -- New: To track which marhala this distribution is for
+    madrasa_ids UUID[], -- New: To store an array of madrasa IDs covered in this distribution
+    markaz_id UUID NOT NULL REFERENCES public.markazes(id) ON DELETE RESTRICT,
+    kitab_id UUID NOT NULL REFERENCES public.kitabs(id) ON DELETE RESTRICT,
+    examiner_teacher_id UUID NOT NULL REFERENCES public.teachers(id) ON DELETE RESTRICT,
+    distribution_date TIMESTAMPTZ NOT NULL,
+    assigned_total_scripts_count INTEGER NOT NULL CHECK (assigned_total_scripts_count >= 0),
+    created_by_user_id UUID REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    
+     
+);
+
+COMMENT ON TABLE public.answer_script_distributions IS 'Stores records of when a batch of answer scripts (for a specific exam, markaz, and kitab) was distributed to an examiner.';
+COMMENT ON COLUMN public.answer_script_distributions.assigned_total_scripts_count IS 'Total number of individual examinee scripts in this distribution batch.';
+COMMENT ON COLUMN public.answer_script_distributions.marhala_id IS 'The specific marhala this distribution batch belongs to.';
+COMMENT ON COLUMN public.answer_script_distributions.madrasa_ids IS 'An array of Madrasa IDs whose scripts are included in this distribution.';
+
+
+DROP TRIGGER IF EXISTS on_answer_script_distributions_updated ON public.answer_script_distributions;
+CREATE TRIGGER on_answer_script_distributions_updated
+BEFORE UPDATE ON public.answer_script_distributions
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+ALTER TABLE public.answer_script_distributions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow admin full access to answer_script_distributions"
+ON public.answer_script_distributions
+FOR ALL
+TO authenticated
+USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

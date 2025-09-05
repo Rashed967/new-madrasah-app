@@ -1,0 +1,36 @@
+
+-- Ensure the handle_updated_at function exists (created in previous steps)
+
+CREATE TABLE IF NOT EXISTS public.exam_fee_collections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    exam_id UUID NOT NULL REFERENCES public.exams(id) ON DELETE RESTRICT,
+    madrasa_id UUID NOT NULL REFERENCES public.madrasas(id) ON DELETE RESTRICT,
+    collection_date TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    apply_late_fee BOOLEAN DEFAULT FALSE NOT NULL,
+    total_calculated_fee NUMERIC(10, 2) NOT NULL CHECK (total_calculated_fee >= 0),
+    total_paid_amount NUMERIC(10, 2) NOT NULL CHECK (total_paid_amount >= 0),
+    balance_amount NUMERIC(10, 2) NOT NULL,
+    created_by UUID REFERENCES auth.users(id),
+    updated_by UUID REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_efc_exam_id ON public.exam_fee_collections(exam_id);
+CREATE INDEX IF NOT EXISTS idx_efc_madrasa_id ON public.exam_fee_collections(madrasa_id);
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_exam_fee_collections_updated ON public.exam_fee_collections;
+CREATE TRIGGER on_exam_fee_collections_updated
+BEFORE UPDATE ON public.exam_fee_collections
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies (Example - adjust as needed)
+-- ALTER TABLE public.exam_fee_collections ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow admin full access for exam_fee_collections"
+--   ON public.exam_fee_collections
+--   FOR ALL TO authenticated
+--   USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+--   WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

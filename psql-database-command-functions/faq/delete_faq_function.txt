@@ -1,0 +1,15 @@
+-- Function to soft-delete (deactivate) an FAQ
+CREATE OR REPLACE FUNCTION delete_faq(
+  p_faq_id BIGINT
+)
+RETURNS SETOF faqs
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  UPDATE faqs
+  SET is_active = FALSE
+  WHERE id = p_faq_id
+  RETURNING *;
+END;
+$$; 

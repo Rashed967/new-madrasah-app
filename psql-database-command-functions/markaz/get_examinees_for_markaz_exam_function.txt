@@ -1,0 +1,43 @@
+-- Function to get a list of all examinees for a given exam and markaz
+CREATE OR REPLACE FUNCTION public.get_examinees_for_markaz_exam(
+    p_exam_id UUID,
+    p_markaz_id UUID
+)
+RETURNS TABLE (
+    roll_number INTEGER,
+    registration_number INTEGER,
+    name_bn TEXT,
+    madrasa_name_bn TEXT
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH assigned_madrasas AS (
+        -- Find all unique madrasa_ids assigned to the given markaz for the given exam
+        SELECT DISTINCT mma.madrasa_id
+        FROM public.markaz_madrasa_marhala_assignments mma
+        WHERE mma.exam_id = p_exam_id
+          AND mma.markaz_id = p_markaz_id
+    )
+    SELECT
+        ex.roll_number,
+        ex.registration_number,
+        ex.name_bn,
+        m.name_bn AS madrasa_name_bn
+    FROM public.examinees ex
+    JOIN public.madrasas m ON ex.madrasa_id = m.id
+    WHERE 
+        ex.exam_id = p_exam_id
+      AND 
+        ex.madrasa_id IN (SELECT madrasa_id FROM assigned_madrasas)
+      AND
+        ex.roll_number IS NOT NULL -- Only include examinees with assigned roll numbers
+    ORDER BY
+        ex.roll_number ASC;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_examinees_for_markaz_exam(UUID, UUID) TO authenticated;

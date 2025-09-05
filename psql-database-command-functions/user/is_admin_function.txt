@@ -1,0 +1,22 @@
+
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    -- This function checks if the currently authenticated user's role
+    -- in the user_profiles table is either 'admin' or 'super_admin'.
+    -- It's used on the login page to authorize access immediately after authentication.
+    -- SECURITY DEFINER is used to ensure the function can read the user_profiles table,
+    -- even if the user themselves might not have direct read access via RLS.
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.user_profiles
+        WHERE id = auth.uid() AND (role = 'admin' OR role = 'super_admin')
+    );
+$$;
+
+-- Grant execute permission to any authenticated user.
+-- The function itself contains the logic to check their specific role.
+GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated;

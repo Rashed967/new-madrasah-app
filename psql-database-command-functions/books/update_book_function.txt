@@ -1,0 +1,31 @@
+
+CREATE OR REPLACE FUNCTION public.update_book(
+    p_book_id UUID,
+    p_title TEXT,
+    p_author TEXT,
+    p_price NUMERIC,
+    p_stock_adjustment INTEGER
+)
+RETURNS books
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_book books%ROWTYPE;
+BEGIN
+    UPDATE public.books
+    SET 
+        title = p_title,
+        author = p_author,
+        price = p_price,
+        current_stock = current_stock + p_stock_adjustment,
+        -- initial_stock should not be changed by this function
+        updated_at = NOW()
+    WHERE id = p_book_id
+    RETURNING * INTO v_updated_book;
+    
+    RETURN v_updated_book;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_book(UUID, TEXT, TEXT, NUMERIC, INTEGER) TO authenticated;

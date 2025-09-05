@@ -1,0 +1,65 @@
+CREATE OR REPLACE FUNCTION public.get_book_sales_history(
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10,
+    p_start_date DATE DEFAULT NULL,
+    p_end_date DATE DEFAULT NULL,
+    p_book_id UUID DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    _offset INTEGER;
+    _items_jsonb JSONB;
+    _total_items INTEGER;
+    _base_query TEXT;
+    _data_query TEXT;
+    _count_query TEXT;
+    _where_clauses TEXT[] := ARRAY['TRUE'];
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    IF p_start_date IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('bs.sale_date >= %L', p_start_date));
+    END IF;
+
+    IF p_end_date IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('bs.sale_date <= %L', p_end_date));
+    END IF;
+
+    IF p_book_id IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('bs.book_id = %L', p_book_id));
+    END IF;
+
+    _base_query := '
+        FROM public.book_sales bs
+        JOIN public.books b ON bs.book_id = b.id
+        WHERE ' || array_to_string(_where_clauses, ' AND ');
+
+    _count_query := 'SELECT COUNT(bs.id)' || _base_query;
+    EXECUTE _count_query INTO _total_items;
+
+    _data_query := '
+        SELECT
+            bs.id,
+            bs.book_id,
+            b.title as book_title,
+            bs.quantity_sold,
+            bs.price_per_unit,
+            bs.total_amount,
+            bs.sale_date,
+            bs.customer_name,
+            bs.notes,
+            bs.created_at
+        ' || _base_query || '
+        ORDER BY bs.sale_date DESC, bs.created_at DESC
+        LIMIT ' || p_limit || ' OFFSET ' || _offset;
+    
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _data_query || ') q' INTO _items_jsonb;
+    
+    RETURN jsonb_build_object('items', _items_jsonb, 'totalItems', _total_items);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_book_sales_history(INTEGER, INTEGER, DATE, DATE, UUID) TO authenticated;

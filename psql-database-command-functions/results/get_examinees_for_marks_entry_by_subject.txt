@@ -1,0 +1,30 @@
+CREATE OR REPLACE FUNCTION public.get_examinees_for_marks_entry_by_subject(
+    p_exam_id UUID,
+    p_examiner_id UUID,
+    p_kitab_id UUID
+)
+RETURNS TABLE (
+    examinee_id UUID,
+    roll_number INTEGER,
+    name_bn TEXT
+)
+LANGUAGE sql STABLE SECURITY DEFINER AS $$
+    SELECT
+        d.examinee_id,
+        d.roll_number,
+        e.name_bn
+    FROM
+        public.answer_script_distributions a
+    JOIN
+        public.distributed_script_details d ON a.id = d.distribution_id
+    JOIN
+        public.examinees e ON d.examinee_id = e.id
+    WHERE
+        a.exam_id = p_exam_id
+        AND a.examiner_teacher_id = p_examiner_id
+        AND a.kitab_id = p_kitab_id
+    ORDER BY
+        d.roll_number;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_examinees_for_marks_entry_by_subject(UUID, UUID, UUID) TO authenticated;

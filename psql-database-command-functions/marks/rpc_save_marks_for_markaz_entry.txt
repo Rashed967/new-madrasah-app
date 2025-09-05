@@ -1,0 +1,82 @@
+
+CREATE OR REPLACE FUNCTION public.save_marks_for_markaz_entry_bulk(
+    p_exam_id UUID,
+    p_marks_payload JSONB[] -- [{examinee_id, kitab_id, obtained_marks, status}]
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    mark_item JSONB;
+    v_user_id UUID := auth.uid();
+    upserted_count INTEGER := 0;
+    
+    _examinee_id UUID;
+    _kitab_id UUID;
+    _obtained_marks INTEGER;
+    _status TEXT;
+    _full_marks INTEGER;
+
+BEGIN
+    IF p_exam_id IS NULL THEN
+        RAISE EXCEPTION 'পরীক্ষা আইডি আবশ্যক।';
+    END IF;
+    IF p_marks_payload IS NULL OR array_length(p_marks_payload, 1) IS NULL THEN
+        RETURN jsonb_build_object('success', true, 'message', 'কোনো নম্বর সংরক্ষণের জন্য পাওয়া যায়নি।');
+    END IF;
+
+    FOREACH mark_item IN ARRAY p_marks_payload
+    LOOP
+        _examinee_id := (mark_item->>'examinee_id')::UUID;
+        _kitab_id := (mark_item->>'kitab_id')::UUID;
+        _status := COALESCE(mark_item->>'status', 'present');
+
+        IF _status = 'present' THEN
+            IF NOT(mark_item ? 'obtained_marks') OR mark_item->'obtained_marks' IS NULL OR mark_item->'obtained_marks' = 'null'::jsonb OR (mark_item->>'obtained_marks') = '' THEN
+                RAISE EXCEPTION 'Present স্ট্যাটাসের জন্য প্রাপ্ত নম্বর আবশ্যক। Examinee ID: %, Kitab ID: %', _examinee_id, _kitab_id;
+            END IF;
+            _obtained_marks := (mark_item->>'obtained_marks')::INTEGER;
+        ELSE
+            _obtained_marks := NULL;
+        END IF;
+
+        -- Validation
+        SELECT full_marks INTO _full_marks FROM public.kitabs WHERE id = _kitab_id;
+        IF _full_marks IS NULL THEN
+            RAISE WARNING 'কিতাব আইডি % খুঁজে পাওয়া যায়নি, এই নম্বরটি উপেক্ষা করা হচ্ছে।', _kitab_id;
+            CONTINUE;
+        END IF;
+        IF _status = 'present' AND (_obtained_marks < 0 OR _obtained_marks > _full_marks) THEN
+            RAISE EXCEPTION 'পরীক্ষার্থী আইডি % এর জন্য কিতাব আইডি % এর প্রাপ্ত নম্বর (%s) অবশ্যই ০ থেকে %s এর মধ্যে হতে হবে।', _examinee_id, _kitab_id, _obtained_marks, _full_marks;
+        END IF;
+
+        INSERT INTO public.marks (
+            examinee_id, exam_id, kitab_id, obtained_marks, status,
+            distribution_id, examiner_id, entered_by
+        ) VALUES (
+            _examinee_id, p_exam_id, _kitab_id, _obtained_marks, _status,
+            NULL, NULL, v_user_id -- distribution_id and examiner_id are NULL for markaz-based entry
+        )
+        ON CONFLICT (examinee_id, exam_id, kitab_id) 
+        DO UPDATE SET
+            obtained_marks = EXCLUDED.obtained_marks,
+            status = EXCLUDED.status,
+            distribution_id = NULL, -- Ensure it remains NULL on update
+            examiner_id = NULL,   -- Ensure it remains NULL on update
+            entered_by = EXCLUDED.entered_by,
+            updated_at = NOW();
+
+        upserted_count := upserted_count + 1;
+    END LOOP;
+
+    RETURN jsonb_build_object('success', true, 'upserted_count', upserted_count);
+
+EXCEPTION
+    WHEN others THEN
+        RAISE WARNING 'Error in save_marks_for_markaz_entry_bulk: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.save_marks_for_markaz_entry_bulk(UUID, JSONB[]) TO authenticated;

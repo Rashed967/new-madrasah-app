@@ -1,0 +1,44 @@
+
+-- Ensure the handle_updated_at function exists (create if not)
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at()
+-- RETURNS TRIGGER AS $$
+-- BEGIN
+--     NEW.updated_at = NOW();
+--     RETURN NEW;
+-- END;
+-- $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Markazes Table Schema
+CREATE TABLE IF NOT EXISTS public.markazes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    markaz_code INTEGER UNIQUE NOT NULL, -- Changed from TEXT to INTEGER
+    name_bn TEXT NOT NULL, 
+    host_madrasa_id UUID UNIQUE NOT NULL REFERENCES public.madrasas(id) ON DELETE RESTRICT, 
+    zone_id UUID NOT NULL REFERENCES public.zones(id) ON DELETE RESTRICT,
+    examinee_capacity INTEGER NOT NULL CHECK (examinee_capacity > 0),
+    is_active BOOLEAN DEFAULT TRUE NOT NULL, 
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_markazes_host_madrasa_id ON public.markazes(host_madrasa_id);
+CREATE INDEX IF NOT EXISTS idx_markazes_zone_id ON public.markazes(zone_id);
+CREATE INDEX IF NOT EXISTS idx_markazes_is_active ON public.markazes(is_active);
+CREATE INDEX IF NOT EXISTS idx_markazes_markaz_code ON public.markazes(markaz_code); -- Index on markaz_code
+
+
+-- Trigger for updated_at (assuming handle_updated_at function exists from previous setups)
+DROP TRIGGER IF EXISTS on_markazes_updated ON public.markazes;
+CREATE TRIGGER on_markazes_updated
+BEFORE UPDATE ON public.markazes
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies (Example - adjust to your security model)
+-- ALTER TABLE public.markazes ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow public read access for markazes" ON public.markazes FOR SELECT USING (true);
+-- CREATE POLICY "Allow insert for admins for markazes" ON public.markazes FOR INSERT TO authenticated WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+-- CREATE POLICY "Allow update for admins for markazes" ON public.markazes FOR UPDATE TO authenticated USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin')) WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+-- CREATE POLICY "Allow delete for super_admins for markazes" ON public.markazes FOR DELETE TO authenticated USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) = 'super_admin');
+-- Note: "Delete" policy might interact with soft-delete logic. If using soft delete, RLS for DELETE might not be what's needed, instead, updates to `is_active` would be controlled.

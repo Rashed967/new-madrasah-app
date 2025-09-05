@@ -1,0 +1,109 @@
+-- Function: public.get_grouped_negrans_by_exam
+-- Purpose: Fetch Negrans grouped by Markaz for a specific exam, with pagination and search for markaz.
+-- Includes host madrasa address details and counts of head/assistant negrans.
+-- Returns: JSONB { items: MarkazWithNegransFromRPC[], totalItems: INTEGER }
+
+CREATE OR REPLACE FUNCTION public.get_grouped_negrans_by_exam(
+    p_exam_id UUID,
+    p_search_term TEXT DEFAULT NULL,
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    _items_jsonb JSONB;
+    _total_items INTEGER;
+    _offset INTEGER;
+    _markaz_query_base TEXT;
+    _markaz_query_data TEXT;
+    _markaz_query_count TEXT;
+    _where_clauses TEXT[] := ARRAY['mk.is_active = TRUE'];
+BEGIN
+    IF p_exam_id IS NULL THEN
+        RAISE EXCEPTION 'পরীক্ষা আইডি আবশ্যক।';
+    END IF;
+
+    _offset := (p_page - 1) * p_limit;
+
+    IF p_search_term IS NOT NULL AND TRIM(p_search_term) <> '' THEN
+        _where_clauses := array_append(_where_clauses,
+            format('(mk.name_bn ILIKE %1$L OR mk.markaz_code::TEXT ILIKE %1$L OR host_mad.name_bn ILIKE %1$L)', '%' || TRIM(p_search_term) || '%')
+        );
+    END IF;
+
+    _where_clauses := array_append(_where_clauses,
+        format($f$(EXISTS (
+            SELECT 1
+            FROM public.exam_personnel_assignments sub_epa
+            WHERE sub_epa.exam_id = %L
+              AND sub_epa.markaz_id = mk.id
+              AND sub_epa.assigned_role = 'negran'
+        ))$f$ , p_exam_id)
+    );
+
+    _markaz_query_base := '
+        FROM public.markazes mk
+        LEFT JOIN public.madrasas host_mad ON mk.host_madrasa_id = host_mad.id
+        WHERE ' || array_to_string(_where_clauses, ' AND ');
+
+    _markaz_query_count := 'SELECT COUNT(mk.id) ' || _markaz_query_base;
+    EXECUTE _markaz_query_count INTO _total_items;
+
+    _markaz_query_data := '
+        SELECT
+            mk.id AS markaz_id,
+            mk.name_bn AS markaz_name_bn,
+            mk.markaz_code,
+            host_mad.name_bn AS host_madrasa_name_bn,
+            host_mad.address->>''upazila'' as host_madrasa_upazila,
+            host_mad.address->>''district'' as host_madrasa_district,
+            (
+                SELECT COUNT(*)
+                FROM public.exam_personnel_assignments epa_count
+                WHERE epa_count.exam_id = $1
+                  AND epa_count.markaz_id = mk.id
+                  AND epa_count.assigned_role = ''negran''
+                  AND epa_count.negran_type = ''head''
+            ) AS head_negran_count,
+            (
+                SELECT COUNT(*)
+                FROM public.exam_personnel_assignments epa_count
+                WHERE epa_count.exam_id = $1
+                  AND epa_count.markaz_id = mk.id
+                  AND epa_count.assigned_role = ''negran''
+                  AND epa_count.negran_type = ''assistant''
+            ) AS assistant_negran_count,
+            (
+                SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                    ''assignment_id'', epa.id,
+                    ''personnel_id'', t.id,
+                    ''personnel_name_bn'', t.name_bn,
+                    ''personnel_code'', t.teacher_code,
+                    ''personnel_mobile'', t.mobile,
+                    ''negran_type'', epa.negran_type,
+                    ''educational_qualification_name_bn'', (SELECT m_edu.name_bn FROM public.marhalas m_edu WHERE m_edu.id = t.educational_qualification LIMIT 1),
+                    ''kitabi_qualification_names'', (SELECT array_agg(k.name_bn) FROM public.kitabs k WHERE t.kitabi_qualification IS NOT NULL AND k.id = ANY(t.kitabi_qualification))
+                ) ORDER BY epa.negran_type DESC NULLS LAST, t.name_bn ASC), ''[]''::jsonb)
+                FROM public.exam_personnel_assignments epa
+                JOIN public.teachers t ON epa.personnel_id = t.id
+                WHERE epa.exam_id = $1
+                  AND epa.markaz_id = mk.id
+                  AND epa.assigned_role = ''negran''
+            ) AS negrans
+        ' || _markaz_query_base || '
+        ORDER BY mk.markaz_code ASC
+        LIMIT $2 OFFSET $3';
+
+    EXECUTE format('SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (%s) q', _markaz_query_data)
+    USING p_exam_id, p_limit, _offset
+    INTO _items_jsonb;
+
+    RETURN jsonb_build_object('items', _items_jsonb, 'totalItems', _total_items);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_grouped_negrans_by_exam(UUID, TEXT, INTEGER, INTEGER) TO authenticated;

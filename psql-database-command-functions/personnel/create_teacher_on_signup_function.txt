@@ -1,0 +1,77 @@
+
+CREATE OR REPLACE FUNCTION public.create_teacher_on_signup(
+    p_user_id UUID,
+    p_name_bn TEXT,
+    p_email TEXT,
+    p_mobile TEXT -- Added p_mobile parameter
+)
+RETURNS teachers 
+LANGUAGE plpgsql
+SECURITY DEFINER 
+AS $$
+DECLARE
+    v_new_teacher teachers%ROWTYPE;
+    v_teacher_code TEXT;
+    v_last_code_numeric INTEGER;
+BEGIN
+    -- Validate inputs
+    IF p_user_id IS NULL THEN RAISE EXCEPTION 'ব্যবহারকারী আইডি আবশ্যক।'; END IF;
+    IF p_name_bn IS NULL OR TRIM(p_name_bn) = '' THEN RAISE EXCEPTION 'শিক্ষকের বাংলা নাম আবশ্যক।'; END IF;
+    IF p_email IS NULL OR TRIM(p_email) = '' THEN RAISE EXCEPTION 'শিক্ষকের ইমেইল আবশ্যক।'; END IF;
+    IF p_mobile IS NULL OR TRIM(p_mobile) = '' THEN RAISE EXCEPTION 'শিক্ষকের মোবাইল নম্বর আবশ্যক।'; END IF; -- Added mobile validation
+    IF NOT (p_mobile ~ '^(01[3-9]\d{8})$') THEN RAISE EXCEPTION 'সঠিক বাংলাদেশী মোবাইল নম্বর দিন (১১ সংখ্যা, 013-019 দিয়ে শুরু)।'; END IF; -- Added mobile format validation
+
+    PERFORM 1 FROM public.teacher_user_mapping WHERE user_id = p_user_id;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই ব্যবহারকারীর জন্য ইতিমধ্যে একটি শিক্ষক প্রোফাইল বিদ্যমান রয়েছে।';
+    END IF;
+
+    PERFORM 1 FROM public.teachers WHERE email = p_email;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই ইমেইল (%s) দিয়ে ইতিমধ্যে অন্য একজন শিক্ষক নিবন্ধিত আছেন।', p_email
+        USING ERRCODE = '23505', HINT = 'অন্য ইমেইল ব্যবহার করুন অথবা এডমিনের সাথে যোগাযোগ করুন।';
+    END IF;
+
+    -- Check if mobile is already in use in teachers table
+    PERFORM 1 FROM public.teachers WHERE mobile = p_mobile;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই মোবাইল নম্বর (%s) দিয়ে ইতিমধ্যে অন্য একজন শিক্ষক নিবন্ধিত আছেন।', p_mobile
+        USING ERRCODE = '23505', HINT = 'অন্য মোবাইল নম্বর ব্যবহার করুন অথবা এডমিনের সাথে যোগাযোগ করুন।';
+    END IF;
+
+    SELECT COALESCE(MAX(SUBSTRING(teacher_code FROM 'TC(\d+)')::INTEGER), 0)
+    INTO v_last_code_numeric
+    FROM public.teachers
+    WHERE teacher_code ~ '^TC\d{4,}$';
+    v_teacher_code := 'TC' || LPAD((v_last_code_numeric + 1)::TEXT, 4, '0');
+
+    INSERT INTO public.teachers (
+        teacher_code, name_bn, email, mobile, -- Added mobile column
+        is_active, registered_by, 
+        created_at, updated_at
+        -- nid_number, date_of_birth, gender, educational_qualification are NULLABLE for self-signup
+    )
+    VALUES (
+        v_teacher_code, p_name_bn, p_email, p_mobile, -- Pass p_mobile value
+        TRUE, p_user_id, 
+        NOW(), NOW()
+    )
+    RETURNING * INTO v_new_teacher;
+
+    INSERT INTO public.teacher_user_mapping (teacher_id, user_id, created_at, updated_at)
+    VALUES (v_new_teacher.id, p_user_id, NOW(), NOW());
+
+    RETURN v_new_teacher;
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'একটি ত্রুটি ঘটেছে। এই তথ্য (যেমন ইমেইল বা মোবাইল) দিয়ে ইতিমধ্যে কেউ নিবন্ধিত থাকতে পারে।'
+        USING ERRCODE = '23505', HINT = 'পুনরায় চেষ্টা করুন অথবা এডমিনের সাথে যোগাযোগ করুন।';
+    WHEN others THEN
+        RAISE WARNING 'Error in create_teacher_on_signup: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE;
+END;
+$$;
+
+-- Grant execute permission (updated signature)
+GRANT EXECUTE ON FUNCTION public.create_teacher_on_signup(UUID, TEXT, TEXT, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.create_teacher_on_signup(UUID, TEXT, TEXT, TEXT) TO service_role;

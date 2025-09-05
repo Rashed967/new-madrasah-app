@@ -1,0 +1,32 @@
+
+CREATE OR REPLACE FUNCTION public.update_officials_order(
+    p_ordered_ids UUID[]
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_id UUID;
+    v_order INTEGER := 0;
+    v_user_role TEXT;
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = auth.uid();
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'এই কার্যক্রমের জন্য আপনার অনুমতি নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_ordered_ids IS NULL OR array_length(p_ordered_ids, 1) IS NULL THEN
+        RETURN;
+    END IF;
+
+    FOREACH v_id IN ARRAY p_ordered_ids
+    LOOP
+        UPDATE public.officials
+        SET order_index = v_order
+        WHERE id = v_id;
+        v_order := v_order + 1;
+    END LOOP;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.update_officials_order(UUID[]) TO authenticated;

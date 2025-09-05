@@ -1,0 +1,38 @@
+
+
+CREATE OR REPLACE FUNCTION public.find_examinee_for_cert_app(
+    p_exam_id UUID,
+    p_marhala_id UUID,
+    p_roll_number INTEGER,
+    p_registration_number INTEGER
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+AS $ 
+DECLARE
+    v_examinee_record RECORD;
+BEGIN
+    SELECT 
+        ex.id as examinee_id,
+        ex.name_bn,
+        ex.father_name_bn,
+        mad.name_bn as madrasa_name_bn
+    INTO v_examinee_record
+    FROM public.examinees ex
+    JOIN public.madrasas mad ON ex.madrasa_id = mad.id
+    WHERE ex.exam_id = p_exam_id
+      AND ex.marhala_id = p_marhala_id
+      AND ex.roll_number = p_roll_number
+      AND ex.registration_number = p_registration_number
+      AND ex.status IN ('finalized_fee_paid', 'roll_assigned', 'script_distributed', 'marks_entry_phase', 'completed');
+
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+
+    RETURN to_jsonb(v_examinee_record);
+END;
+$;
+GRANT EXECUTE ON FUNCTION public.find_examinee_for_cert_app(UUID, UUID, INTEGER, INTEGER) TO anon, authenticated;
+

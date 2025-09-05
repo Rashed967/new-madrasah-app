@@ -1,0 +1,7 @@
+-- This script removes the UNIQUE constraints from the name_bn and name_ar columns
+-- in the madrasa_applications table to allow multiple applications to have the same name.
+-- Note: The constraint names 'unique_application_name_bn' and 'unique_application_name_ar'
+-- are based on the table definition.
+
+ALTER TABLE public.madrasa_applications DROP CONSTRAINT IF EXISTS unique_application_name_bn;
+ALTER TABLE public.madrasa_applications DROP CONSTRAINT IF EXISTS unique_application_name_ar;

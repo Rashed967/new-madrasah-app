@@ -1,0 +1,12 @@
+
+CREATE OR REPLACE FUNCTION public.get_active_officials()
+RETURNS SETOF officials
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT *
+    FROM public.officials
+    WHERE is_active = TRUE
+    ORDER BY order_index ASC, created_at ASC;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_active_officials() TO anon, authenticated;

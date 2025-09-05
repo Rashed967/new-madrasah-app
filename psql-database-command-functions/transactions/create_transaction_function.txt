@@ -1,0 +1,75 @@
+-- ===================================================================
+-- RPC Function: create_transaction
+-- Purpose: Inserts a new income or expense record.
+-- ===================================================================
+CREATE OR REPLACE FUNCTION public.create_transaction(
+    p_transaction_date DATE,
+    p_category_id UUID,
+    p_amount NUMERIC,
+    p_type TEXT, -- 'income' or 'expense'
+    p_party_name TEXT,
+    p_voucher_no TEXT,
+    p_description TEXT
+)
+RETURNS transactions -- Returns the newly created transaction row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_transaction transactions%ROWTYPE;
+    v_user_id UUID := auth.uid();
+    v_user_role TEXT;
+    v_category_type TEXT;
+BEGIN
+    -- Authorization check
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'লেনদেন যোগ করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Input validation
+    IF p_transaction_date IS NULL THEN RAISE EXCEPTION 'লেনদেনের তারিখ আবশ্যক।'; END IF;
+    IF p_category_id IS NULL THEN RAISE EXCEPTION 'খাত আইডি আবশ্যক।'; END IF;
+    IF p_amount IS NULL OR p_amount <= 0 THEN RAISE EXCEPTION 'টাকার পরিমাণ অবশ্যই একটি ধনাত্মক সংখ্যা হতে হবে।'; END IF;
+    IF p_type IS NULL OR NOT (p_type IN ('income', 'expense')) THEN RAISE EXCEPTION 'লেনদেনের ধরণ (income/expense) আবশ্যক।'; END IF;
+
+    -- Verify that the category_id exists and its type matches p_type
+    SELECT type INTO v_category_type FROM public.transaction_categories WHERE id = p_category_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত খাত আইডি (%) পাওয়া যায়নি।', p_category_id;
+    END IF;
+    IF v_category_type <> p_type THEN
+        RAISE EXCEPTION 'প্রদত্ত খাতটি (%s) লেনদেনের ধরণের (%s) সাথে মেলে না।', v_category_type, p_type;
+    END IF;
+
+    -- Insert the new transaction
+    INSERT INTO public.transactions (
+        transaction_date,
+        category_id,
+        amount,
+        type,
+        party_name,
+        voucher_no,
+        description,
+        created_by
+    ) VALUES (
+        p_transaction_date,
+        p_category_id,
+        p_amount,
+        p_type,
+        p_party_name,
+        p_voucher_no,
+        p_description,
+        v_user_id
+    ) RETURNING * INTO v_new_transaction;
+
+    RETURN v_new_transaction;
+
+EXCEPTION
+    WHEN others THEN
+        RAISE WARNING 'Error in create_transaction: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_transaction(DATE, UUID, NUMERIC, TEXT, TEXT, TEXT, TEXT) TO authenticated;

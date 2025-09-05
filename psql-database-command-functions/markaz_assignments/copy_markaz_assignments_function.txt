@@ -1,0 +1,171 @@
+
+CREATE OR REPLACE FUNCTION public.copy_markaz_assignments(
+    p_source_exam_id UUID,
+    p_target_exam_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER 
+AS $$
+DECLARE
+    source_assignment RECORD;
+    new_assignment_result public.markaz_madrasa_marhala_assignments%ROWTYPE;
+    target_markaz RECORD;
+    target_madrasa public.madrasas%ROWTYPE; 
+    target_marhala public.marhalas%ROWTYPE; 
+    copied_count INTEGER := 0;
+    skipped_count INTEGER := 0;
+    skipped_reasons JSONB[] := '{}'::JSONB[]; -- Changed initialization
+    v_user_role TEXT;
+    v_current_user_id UUID;
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'এসাইনমেন্ট কপি করার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_source_exam_id IS NULL OR p_target_exam_id IS NULL THEN
+        RAISE EXCEPTION 'উৎস পরীক্ষা এবং লক্ষ্য পরীক্ষার আইডি দুটোই আবশ্যক।';
+    END IF;
+
+    IF p_source_exam_id = p_target_exam_id THEN
+        RAISE EXCEPTION 'উৎস পরীক্ষা এবং লক্ষ্য পরীক্ষা একই হতে পারবে না।';
+    END IF;
+
+    PERFORM 1 FROM public.exams WHERE id = p_source_exam_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'উৎস পরীক্ষা (%) পাওয়া যায়নি।', p_source_exam_id; END IF;
+
+    PERFORM 1 FROM public.exams WHERE id = p_target_exam_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'লক্ষ্য পরীক্ষা (%) পাওয়া যায়নি।', p_target_exam_id; END IF;
+
+    FOR source_assignment IN
+        SELECT 
+            mma.markaz_id, 
+            mma.madrasa_id, 
+            mma.marhala_id,
+            mad.name_bn as madrasa_name_bn, 
+            mar.name_bn as marhala_name_bn   
+        FROM public.markaz_madrasa_marhala_assignments mma
+        JOIN public.madrasas mad ON mma.madrasa_id = mad.id
+        JOIN public.marhalas mar ON mma.marhala_id = mar.id
+        WHERE mma.exam_id = p_source_exam_id
+    LOOP
+        -- Check 1: Markaz exists and is active
+        SELECT * INTO target_markaz FROM public.markazes WHERE id = source_assignment.markaz_id AND is_active = TRUE;
+        IF NOT FOUND THEN
+            skipped_count := skipped_count + 1;
+            skipped_reasons := array_append(skipped_reasons, 
+                jsonb_build_object(
+                    'madrasa', source_assignment.madrasa_name_bn, 
+                    'marhala', source_assignment.marhala_name_bn, 
+                    'reason', 'মারকায (' || COALESCE((SELECT name_bn FROM public.markazes WHERE id = source_assignment.markaz_id LIMIT 1), source_assignment.markaz_id::TEXT) || ') নিষ্ক্রিয় বা অস্তিত্বহীন।'
+                ));
+            CONTINUE;
+        END IF;
+
+        -- Check 2: Madrasa exists
+        SELECT * INTO target_madrasa FROM public.madrasas WHERE id = source_assignment.madrasa_id;
+        IF NOT FOUND THEN
+            skipped_count := skipped_count + 1;
+            skipped_reasons := array_append(skipped_reasons, 
+                jsonb_build_object(
+                    'madrasa_id', source_assignment.madrasa_id, 
+                    'marhala', source_assignment.marhala_name_bn, 
+                    'reason', 'মাদরাসা (' || source_assignment.madrasa_name_bn || ') অস্তিত্বহীন।'
+                ));
+            CONTINUE;
+        END IF;
+        
+        -- Check 3: Marhala exists
+        SELECT * INTO target_marhala FROM public.marhalas WHERE id = source_assignment.marhala_id;
+        IF NOT FOUND THEN
+            skipped_count := skipped_count + 1;
+            skipped_reasons := array_append(skipped_reasons, 
+                jsonb_build_object(
+                    'madrasa', target_madrasa.name_bn, 
+                    'marhala_id', source_assignment.marhala_id, 
+                    'reason', 'মারহালা (' || source_assignment.marhala_name_bn || ') অস্তিত্বহীন।'
+                ));
+            CONTINUE;
+        END IF;
+
+        -- Check 4: Madrasa type compatibility with Marhala type (REMOVED AS PER USER REQUEST)
+        /*
+        IF NOT ((target_madrasa.type = 'both') OR 
+                (target_madrasa.type = 'boys' AND target_marhala.type = 'boys') OR
+                (target_madrasa.type = 'girls' AND target_marhala.type = 'girls')) THEN
+            skipped_count := skipped_count + 1;
+            skipped_reasons := array_append(skipped_reasons, 
+                jsonb_build_object(
+                    'madrasa', target_madrasa.name_bn, 
+                    'marhala', target_marhala.name_bn, 
+                    'reason', 'মাদ্রাসার ধরণ (' || target_madrasa.type || ') ও মারহালার ধরণ (' || target_marhala.type || ') সামঞ্জস্যপূর্ণ নয়।'
+                ));
+            CONTINUE;
+        END IF;
+        */
+
+        -- Check 5: If this Madrasa's Marhala is already assigned to ANY Markaz for the TARGET exam
+        PERFORM 1 FROM public.markaz_madrasa_marhala_assignments
+        WHERE exam_id = p_target_exam_id
+          AND madrasa_id = source_assignment.madrasa_id
+          AND marhala_id = source_assignment.marhala_id;
+        IF FOUND THEN
+            skipped_count := skipped_count + 1;
+            skipped_reasons := array_append(skipped_reasons, 
+                jsonb_build_object(
+                    'madrasa', target_madrasa.name_bn, 
+                    'marhala', target_marhala.name_bn, 
+                    'reason', 'এই মাদ্রাসার এই মারহালাটি ইতিমধ্যে লক্ষ্য পরীক্ষায় ('|| (SELECT name FROM public.exams WHERE id = p_target_exam_id) ||') এসাইন করা আছে।'
+                ));
+            CONTINUE;
+        END IF;
+
+        -- Attempt to create the new assignment
+        BEGIN
+            INSERT INTO public.markaz_madrasa_marhala_assignments (markaz_id, exam_id, madrasa_id, marhala_id, created_at, updated_at)
+            VALUES (source_assignment.markaz_id, p_target_exam_id, source_assignment.madrasa_id, source_assignment.marhala_id, NOW(), NOW())
+            RETURNING * INTO new_assignment_result;
+            copied_count := copied_count + 1;
+        EXCEPTION
+            WHEN unique_violation THEN 
+                skipped_count := skipped_count + 1;
+                skipped_reasons := array_append(skipped_reasons, 
+                    jsonb_build_object(
+                        'madrasa', target_madrasa.name_bn, 
+                        'marhala', target_marhala.name_bn, 
+                        'reason', 'এসাইনমেন্ট ইতিমধ্যে বিদ্যমান (unique_violation)।'
+                    ));
+            WHEN others THEN
+                skipped_count := skipped_count + 1;
+                 RAISE WARNING 'Error during insert for madrasa %, marhala %: %', source_assignment.madrasa_name_bn, source_assignment.marhala_name_bn, SQLERRM;
+                skipped_reasons := array_append(skipped_reasons, 
+                    jsonb_build_object(
+                        'madrasa', target_madrasa.name_bn, 
+                        'marhala', target_marhala.name_bn, 
+                        'reason', 'অজানা ত্রুটি: ' || SQLERRM
+                    ));
+        END;
+    END LOOP;
+
+    RETURN jsonb_build_object(
+        'copied_count', copied_count,
+        'skipped_count', skipped_count,
+        'skipped_reasons', skipped_reasons 
+    );
+EXCEPTION
+    WHEN others THEN
+        RAISE WARNING 'Error in copy_markaz_assignments: %', SQLERRM;
+        RETURN jsonb_build_object(
+            'copied_count', copied_count,
+            'skipped_count', skipped_count,
+            'skipped_reasons', skipped_reasons, -- Return current state of skipped_reasons
+            'error', SQLERRM
+        );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.copy_markaz_assignments(UUID, UUID) TO authenticated;
+    

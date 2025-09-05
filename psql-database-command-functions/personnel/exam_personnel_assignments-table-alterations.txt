@@ -1,0 +1,71 @@
+-- Add negran_type column if it doesn't exist
+ALTER TABLE public.exam_personnel_assignments
+ADD COLUMN IF NOT EXISTS negran_type TEXT CHECK (negran_type IN ('head', 'assistant'));
+
+COMMENT ON COLUMN public.exam_personnel_assignments.negran_type IS 'Type of Negran, e.g., head or assistant. Applicable only if assigned_role is ''negran''.';
+
+-- Modify markaz_id to be nullable
+ALTER TABLE public.exam_personnel_assignments
+ALTER COLUMN markaz_id DROP NOT NULL;
+
+-- Modify assigned_marhala_id to be nullable
+ALTER TABLE public.exam_personnel_assignments
+ALTER COLUMN assigned_marhala_id DROP NOT NULL;
+
+-- Drop existing constraints that might conflict or are outdated
+ALTER TABLE public.exam_personnel_assignments
+DROP CONSTRAINT IF EXISTS check_negran_no_marhala;
+
+ALTER TABLE public.exam_personnel_assignments
+DROP CONSTRAINT IF EXISTS check_mumtahin_has_marhala;
+
+ALTER TABLE public.exam_personnel_assignments
+DROP CONSTRAINT IF EXISTS unique_personnel_assignment_per_exam_markaz_marhala;
+
+-- Drop specific unique constraint if it was named differently (example name)
+ALTER TABLE public.exam_personnel_assignments
+DROP CONSTRAINT IF EXISTS unique_personnel_assignment_key; -- This might have been created from the index name
+
+-- Drop the old unique index on (exam_id, personnel_id)
+DROP INDEX IF EXISTS idx_unique_exam_personnel_assignment;
+ALTER TABLE public.exam_personnel_assignments
+DROP CONSTRAINT IF EXISTS unique_exam_personnel_assignment; -- Drop constraint if it was named this
+
+
+-- Add new unique constraint: one person, one specific role per exam
+-- This is achieved by a unique constraint on (exam_id, personnel_id, assigned_role)
+ALTER TABLE public.exam_personnel_assignments
+DROP CONSTRAINT IF EXISTS unique_exam_personnel_role_assignment; -- Drop if exists by a common naming pattern
+ALTER TABLE public.exam_personnel_assignments
+ADD CONSTRAINT unique_exam_personnel_role_assignment UNIQUE (exam_id, personnel_id, assigned_role);
+
+
+-- Add new CHECK constraints based on the new rules
+ALTER TABLE public.exam_personnel_assignments
+DROP CONSTRAINT IF EXISTS check_negran_assignment_rules; 
+ALTER TABLE public.exam_personnel_assignments
+ADD CONSTRAINT check_negran_assignment_rules
+CHECK (
+    (assigned_role = 'negran' AND markaz_id IS NOT NULL AND assigned_marhala_id IS NULL AND negran_type IS NOT NULL) OR
+    (assigned_role <> 'negran')
+);
+
+ALTER TABLE public.exam_personnel_assignments
+DROP CONSTRAINT IF EXISTS check_mumtahin_assignment_rules; 
+ALTER TABLE public.exam_personnel_assignments
+ADD CONSTRAINT check_mumtahin_assignment_rules
+CHECK (
+    (assigned_role = 'mumtahin' AND markaz_id IS NULL AND assigned_marhala_id IS NULL AND negran_type IS NULL) OR
+    (assigned_role <> 'mumtahin')
+);
+
+-- Constraint to ensure negran_type is NULL if role is not 'negran'
+ALTER TABLE public.exam_personnel_assignments
+DROP CONSTRAINT IF EXISTS check_negran_type_role_consistency;
+
+ALTER TABLE public.exam_personnel_assignments
+ADD CONSTRAINT check_negran_type_role_consistency
+CHECK (
+    (assigned_role = 'negran' AND negran_type IN ('head', 'assistant')) OR
+    (assigned_role <> 'negran' AND negran_type IS NULL)
+);

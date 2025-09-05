@@ -1,0 +1,75 @@
+
+CREATE OR REPLACE FUNCTION public.update_examinee(
+    p_examinee_id UUID,
+    p_updates JSONB -- Expected: {name_bn, name_ar, name_en, father_name_bn, ..., photo_url (can be null to remove)}
+)
+RETURNS examinees -- Returns the updated examinee row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_examinee examinees%ROWTYPE;
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+BEGIN
+    -- Role Check (Ensure user has permission)
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'পরীক্ষার্থীর তথ্য আপডেট করার অনুমতি আপনার নেই।' USING ERRCODE = '42501'; -- permission_denied
+    END IF;
+
+    IF p_examinee_id IS NULL THEN
+        RAISE EXCEPTION 'পরীক্ষার্থী আইডি আবশ্যক।';
+    END IF;
+
+    -- Validate essential fields if they are present in p_updates
+    IF p_updates ? 'name_bn' AND (p_updates->>'name_bn' IS NULL OR TRIM(p_updates->>'name_bn') = '') THEN
+        RAISE EXCEPTION 'পরীক্ষার্থীর বাংলা নাম খালি হতে পারবে না।';
+    END IF;
+    IF p_updates ? 'father_name_bn' AND (p_updates->>'father_name_bn' IS NULL OR TRIM(p_updates->>'father_name_bn') = '') THEN
+        RAISE EXCEPTION 'পিতার বাংলা নাম খালি হতে পারবে না।';
+    END IF;
+    IF p_updates ? 'mother_name_bn' AND (p_updates->>'mother_name_bn' IS NULL OR TRIM(p_updates->>'mother_name_bn') = '') THEN
+        RAISE EXCEPTION 'মাতার বাংলা নাম খালি হতে পারবে না।';
+    END IF;
+    IF p_updates ? 'date_of_birth' AND (p_updates->>'date_of_birth' IS NULL OR TRIM(p_updates->>'date_of_birth') = '') THEN
+        RAISE EXCEPTION 'জন্ম তারিখ খালি হতে পারবে না।';
+    END IF;
+    IF p_updates ? 'nid_or_birth_cert' AND (p_updates->>'nid_or_birth_cert' IS NULL OR TRIM(p_updates->>'nid_or_birth_cert') = '') THEN
+        RAISE EXCEPTION 'NID বা জন্ম নিবন্ধন নম্বর খালি হতে পারবে না।';
+    END IF;
+    
+    -- Core academic identifiers are NOT updatable here to maintain data integrity.
+    -- exam_id, madrasa_id, marhala_id, registration_number, student_type, status
+    -- status should be updated via a separate, controlled workflow (e.g., change_examinee_status function).
+
+    UPDATE public.examinees
+    SET
+        name_bn = COALESCE((p_updates->>'name_bn')::TEXT, name_bn),
+        name_ar = COALESCE((p_updates->>'name_ar')::TEXT, name_ar),
+        name_en = COALESCE((p_updates->>'name_en')::TEXT, name_en),
+        father_name_bn = COALESCE((p_updates->>'father_name_bn')::TEXT, father_name_bn),
+        father_name_ar = COALESCE((p_updates->>'father_name_ar')::TEXT, father_name_ar),
+        father_name_en = COALESCE((p_updates->>'father_name_en')::TEXT, father_name_en),
+        mother_name_bn = COALESCE((p_updates->>'mother_name_bn')::TEXT, mother_name_bn),
+        mother_name_ar = COALESCE((p_updates->>'mother_name_ar')::TEXT, mother_name_ar),
+        mother_name_en = COALESCE((p_updates->>'mother_name_en')::TEXT, mother_name_en),
+        date_of_birth = COALESCE((p_updates->>'date_of_birth')::DATE, date_of_birth),
+        nid_or_birth_cert = COALESCE((p_updates->>'nid_or_birth_cert')::TEXT, nid_or_birth_cert),
+        photo_url = CASE 
+                        WHEN p_updates ? 'photo_url' THEN (p_updates->>'photo_url')::TEXT -- Allows setting to new URL or NULL
+                        ELSE photo_url -- If 'photo_url' key is not in p_updates, keep existing
+                    END,
+        updated_at = NOW()
+    WHERE id = p_examinee_id
+    RETURNING * INTO v_updated_examinee;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'পরীক্ষার্থী আইডি (%) খুঁজে পাওয়া যায়নি।', p_examinee_id;
+    END IF;
+
+    RETURN v_updated_examinee;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_examinee(UUID, JSONB) TO authenticated;

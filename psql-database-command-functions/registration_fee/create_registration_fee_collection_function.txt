@@ -1,0 +1,271 @@
+
+
+CREATE OR REPLACE FUNCTION public.create_registration_fee_collection(
+    p_exam_id UUID,
+    p_madrasa_id UUID,
+    p_apply_late_fee BOOLEAN,
+    p_collection_date TIMESTAMPTZ,
+    p_marhala_counts JSONB[], -- Array of {marhala_id, regular_students, irregular_students, calculated_fee_for_marhala, registration_number_range_start, registration_number_range_end}
+    p_payments JSONB[]       -- Array of {method, amount, paymentDate, transactionId, ...}
+)
+RETURNS JSONB -- Returns the ID of the created collection and overall totals
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_collection_id UUID;
+    v_receipt_no INTEGER; -- Added to hold the new receipt number
+    v_total_calculated_fee NUMERIC := 0;
+    v_total_paid_amount NUMERIC := 0;
+    v_balance_amount NUMERIC;
+    v_marhala_count_item JSONB;
+    v_payment_item JSONB;
+    v_user_id UUID := auth.uid();
+    v_user_role TEXT;
+
+    -- Exam related variables for registration number
+    v_exam_starting_reg_no INTEGER;
+    v_exam_last_used_reg_no INTEGER;
+    v_current_collection_start_reg_no INTEGER;
+    v_total_students_in_collection INTEGER := 0;
+    v_new_exam_last_used_reg_no INTEGER;
+
+    -- Marhala count variables
+    _mc_marhala_id UUID;
+    _mc_regular_students INTEGER;
+    _mc_irregular_students INTEGER;
+    _mc_calculated_fee NUMERIC;
+    _mc_reg_no_start INTEGER; 
+    _mc_reg_no_end INTEGER;   
+
+    -- Payment variables
+    _p_method TEXT;
+    _p_amount NUMERIC;
+    _p_payment_date DATE;
+    _p_transaction_id TEXT;
+    _p_bank_name TEXT;
+    _p_branch_name TEXT;
+    _p_account_number TEXT;
+    _p_check_number TEXT;
+    _p_mobile_banking_provider TEXT;
+    _p_sender_number TEXT;
+    _p_receiver_number TEXT;
+    _p_notes TEXT;
+
+    -- Additional variables for creating the transaction
+    v_transaction_category_id UUID;
+    v_madrasa_name TEXT;
+    v_exam_name TEXT;
+    v_transaction_description TEXT;
+
+BEGIN
+    -- Role check
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'ফি সংগ্রহের অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    -- Validate required inputs
+    IF p_exam_id IS NULL OR p_madrasa_id IS NULL OR p_collection_date IS NULL THEN
+        RAISE EXCEPTION 'পরীক্ষা আইডি, মাদরাসা আইডি এবং সংগ্রহের তারিখ আবশ্যক।';
+    END IF;
+    IF p_marhala_counts IS NULL OR array_length(p_marhala_counts, 1) IS NULL THEN
+        RAISE EXCEPTION 'মারহালা ভিত্তিক ছাত্র সংখ্যা আবশ্যক।';
+    END IF;
+
+    -- Removed check for existing fee collection record
+
+    -- Lock the exam row and get registration number details
+    SELECT starting_registration_number, last_used_registration_number
+    INTO v_exam_starting_reg_no, v_exam_last_used_reg_no
+    FROM public.exams
+    WHERE id = p_exam_id
+    FOR UPDATE; -- Lock the row to prevent concurrent updates to last_used_registration_number
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'পরীক্ষা আইডি (%) খুঁজে পাওয়া যায়নি।', p_exam_id;
+    END IF;
+
+    v_current_collection_start_reg_no := COALESCE(v_exam_last_used_reg_no, v_exam_starting_reg_no - 1) + 1;
+
+    -- Calculate total_calculated_fee and total_students_in_collection from marhala_counts
+    FOREACH v_marhala_count_item IN ARRAY p_marhala_counts
+    LOOP
+        _mc_calculated_fee := (v_marhala_count_item->>'calculated_fee_for_marhala')::NUMERIC;
+        _mc_regular_students := (v_marhala_count_item->>'regular_students')::INTEGER;
+        _mc_irregular_students := (v_marhala_count_item->>'irregular_students')::INTEGER;
+
+        IF _mc_calculated_fee < 0 THEN
+             RAISE EXCEPTION 'মারহালার (%s) জন্য গণনাকৃত ফি ঋণাত্মক হতে পারবে না।', v_marhala_count_item->>'marhala_id';
+        END IF;
+        IF _mc_regular_students < 0 OR _mc_irregular_students < 0 THEN
+            RAISE EXCEPTION 'মারহালা (%s) এর পরীক্ষার্থী সংখ্যা ঋণাত্মক হতে পারবে না।', v_marhala_count_item->>'marhala_id';
+        END IF;
+
+        v_total_calculated_fee := v_total_calculated_fee + _mc_calculated_fee;
+        v_total_students_in_collection := v_total_students_in_collection + _mc_regular_students + _mc_irregular_students;
+    END LOOP;
+
+    -- Calculate total_paid_amount from payments
+    IF p_payments IS NOT NULL THEN
+        FOREACH v_payment_item IN ARRAY p_payments
+        LOOP
+            -- Use 'paymentDate' from frontend camelCase
+            _p_amount := COALESCE((v_payment_item->>'amount')::NUMERIC, 0);
+            IF _p_amount <= 0 AND v_total_calculated_fee > 0 THEN 
+                 RAISE EXCEPTION 'পেমেন্টের পরিমাণ অবশ্যই ধনাত্মক হতে হবে যদি মোট প্রদেয় ফি শূন্য না হয়।'; 
+            END IF;
+            v_total_paid_amount := v_total_paid_amount + _p_amount;
+        END LOOP;
+    END IF;
+    
+    IF v_total_paid_amount = 0 AND v_total_calculated_fee > 0 THEN
+        RAISE EXCEPTION 'মোট প্রদেয় ফি শূন্য না হলে অবশ্যই কিছু অর্থ জমা করতে হবে।';
+    END IF;
+
+    v_balance_amount := v_total_calculated_fee - v_total_paid_amount;
+
+    -- Insert into registration_fee_collections
+    INSERT INTO public.registration_fee_collections (
+        exam_id, madrasa_id, apply_late_fee, collection_date,
+        total_calculated_fee, total_paid_amount, balance_amount,
+        created_by, updated_by
+    )
+    VALUES (
+        p_exam_id, p_madrasa_id, COALESCE(p_apply_late_fee, FALSE), p_collection_date,
+        v_total_calculated_fee, v_total_paid_amount, v_balance_amount,
+        v_user_id, v_user_id
+    )
+    RETURNING id, receipt_no INTO v_collection_id, v_receipt_no; -- Get the new receipt_no
+
+    -- Insert into registration_fee_marhala_counts
+    FOREACH v_marhala_count_item IN ARRAY p_marhala_counts
+    LOOP
+        _mc_marhala_id := (v_marhala_count_item->>'marhala_id')::UUID;
+        _mc_regular_students := (v_marhala_count_item->>'regular_students')::INTEGER;
+        _mc_irregular_students := (v_marhala_count_item->>'irregular_students')::INTEGER;
+        _mc_calculated_fee := (v_marhala_count_item->>'calculated_fee_for_marhala')::NUMERIC;
+        _mc_reg_no_start := (v_marhala_count_item->>'registration_number_range_start')::INTEGER;
+        _mc_reg_no_end := (v_marhala_count_item->>'registration_number_range_end')::INTEGER;
+
+        INSERT INTO public.registration_fee_marhala_counts (
+            registration_fee_collection_id, marhala_id, regular_students, irregular_students, calculated_fee_for_marhala,
+            registration_number_range_start, registration_number_range_end 
+        )
+        VALUES (
+            v_collection_id, _mc_marhala_id, _mc_regular_students, _mc_irregular_students, _mc_calculated_fee,
+            _mc_reg_no_start, _mc_reg_no_end 
+        );
+    END LOOP;
+
+    -- Insert into registration_fee_payments
+    IF p_payments IS NOT NULL THEN
+        FOREACH v_payment_item IN ARRAY p_payments
+        LOOP
+            _p_method := v_payment_item->>'method';
+            _p_amount := COALESCE((v_payment_item->>'amount')::NUMERIC, 0);
+            _p_payment_date := (v_payment_item->>'paymentDate')::DATE; -- Expecting camelCase
+            _p_transaction_id := v_payment_item->>'transactionId';
+            _p_bank_name := v_payment_item->>'bankName';
+            _p_branch_name := v_payment_item->>'branchName';
+            _p_account_number := v_payment_item->>'accountNumber';
+            _p_check_number := v_payment_item->>'checkNumber';
+            _p_mobile_banking_provider := v_payment_item->>'mobileBankingProvider';
+            _p_sender_number := v_payment_item->>'senderNumber';
+            _p_receiver_number := v_payment_item->>'receiverNumber';
+            _p_notes := v_payment_item->>'notes';
+
+            IF _p_method IS NULL OR _p_method = '' THEN RAISE EXCEPTION 'পেমেন্ট পদ্ধতি আবশ্যক।'; END IF;
+            IF _p_amount <= 0 AND v_total_calculated_fee > 0 THEN RAISE EXCEPTION 'পেমেন্টের পরিমাণ ধনাত্মক হতে হবে।'; END IF;
+            IF _p_payment_date IS NULL THEN RAISE EXCEPTION 'পেমেন্টের তারিখ আবশ্যক।'; END IF;
+            IF _p_method = 'check' AND (_p_check_number IS NULL OR TRIM(_p_check_number) = '') THEN RAISE EXCEPTION 'চেক নম্বর আবশ্যক।'; END IF;
+            IF (_p_method = 'mobile_banking' OR _p_method = 'bank_transfer') AND (_p_transaction_id IS NULL OR TRIM(_p_transaction_id) = '') THEN RAISE EXCEPTION 'ট্রানজেকশন আইডি আবশ্যক।'; END IF;
+
+            INSERT INTO public.registration_fee_payments (
+                registration_fee_collection_id, method, amount, payment_date,
+                transaction_id, bank_name, branch_name, account_number, check_number,
+                mobile_banking_provider, sender_number, receiver_number, notes
+            )
+            VALUES (
+                v_collection_id, _p_method, _p_amount, _p_payment_date,
+                _p_transaction_id, _p_bank_name, _p_branch_name, _p_account_number, _p_check_number,
+                _p_mobile_banking_provider, _p_sender_number, _p_receiver_number, _p_notes
+            );
+        END LOOP;
+    END IF;
+
+    -- Update last_used_registration_number in exams table
+    IF v_total_students_in_collection > 0 THEN
+        v_new_exam_last_used_reg_no := v_current_collection_start_reg_no + v_total_students_in_collection - 1;
+        UPDATE public.exams
+        SET last_used_registration_number = v_new_exam_last_used_reg_no,
+            updated_at = NOW()
+        WHERE id = p_exam_id;
+    END IF;
+
+    -- Update examinee status to Fee_Paid if balance is zero
+    IF v_balance_amount <= 0 THEN
+        UPDATE public.examinees
+        SET status = 'Fee_Paid'
+        WHERE registration_fee_collection_id = v_collection_id;
+    END IF;
+
+    -- Create a corresponding transaction for the income
+    BEGIN
+        -- Get the category ID for 'নিবন্ধন ফি'
+        SELECT id INTO v_transaction_category_id
+        FROM public.transaction_categories
+        WHERE name = 'নিবন্ধন ফি' AND type = 'income'
+        LIMIT 1;
+
+        -- Get madrasa and exam names for the description
+        SELECT name_bn INTO v_madrasa_name FROM public.madrasas WHERE id = p_madrasa_id;
+        SELECT name INTO v_exam_name FROM public.exams WHERE id = p_exam_id;
+
+        -- Create the description
+        v_transaction_description := 'নিবন্ধন ফি বাবদ আয়: ' || v_exam_name || ' (' || v_madrasa_name || ')';
+
+        -- Create the transaction if a category is found and payment was made
+        IF v_transaction_category_id IS NOT NULL AND v_total_paid_amount > 0 THEN
+            INSERT INTO public.transactions (
+                transaction_date,
+                category_id,
+                amount,
+                type,
+                party_name,
+                description,
+                created_by
+            )
+            VALUES (
+                p_collection_date,
+                v_transaction_category_id,
+                v_total_paid_amount,
+                'income',
+                v_madrasa_name,
+                v_transaction_description,
+                v_user_id
+            );
+        END IF;
+    EXCEPTION
+        WHEN others THEN
+            RAISE WARNING 'Could not create transaction for registration fee collection %: % ', v_collection_id, SQLERRM;
+            -- Do not re-raise, as the main fee collection was successful
+    END;
+
+    RETURN jsonb_build_object(
+        'id', v_collection_id,
+        'receipt_no', v_receipt_no, -- Return the new receipt number
+        'total_calculated_fee', v_total_calculated_fee,
+        'total_paid_amount', v_total_paid_amount,
+        'balance_amount', v_balance_amount,
+        'assigned_reg_no_start', CASE WHEN v_total_students_in_collection > 0 THEN v_current_collection_start_reg_no ELSE NULL END,
+        'assigned_reg_no_end', CASE WHEN v_total_students_in_collection > 0 THEN v_new_exam_last_used_reg_no ELSE NULL END
+    );
+EXCEPTION
+    WHEN others THEN
+        RAISE WARNING 'Error in create_registration_fee_collection: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE; -- Re-raise the original error to be caught by the client
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_registration_fee_collection(UUID, UUID, BOOLEAN, TIMESTAMPTZ, JSONB[], JSONB[]) TO authenticated;

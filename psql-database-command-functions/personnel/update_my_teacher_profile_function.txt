@@ -1,0 +1,75 @@
+CREATE OR REPLACE FUNCTION public.update_my_teacher_profile(
+    p_updates JSONB -- JSONB object containing fields to update
+)
+RETURNS teachers -- Returns the updated teacher row
+LANGUAGE plpgsql
+SECURITY DEFINER -- To ensure it can find mapping and call update_teacher
+AS $$
+DECLARE
+    v_current_user_id UUID := auth.uid();
+    v_teacher_id_from_mapping UUID;
+    v_updated_teacher teachers%ROWTYPE;
+    v_allowed_updates JSONB;
+BEGIN
+    IF v_current_user_id IS NULL THEN
+        RAISE EXCEPTION 'আপডেট করার জন্য আপনাকে অবশ্যই লগইন করতে হবে।';
+    END IF;
+
+    -- Get teacher_id from teacher_user_mapping
+    SELECT teacher_id INTO v_teacher_id_from_mapping
+    FROM public.teacher_user_mapping
+    WHERE user_id = v_current_user_id;
+
+    IF v_teacher_id_from_mapping IS NULL THEN
+        RAISE EXCEPTION 'আপনার শিক্ষক প্রোফাইল খুঁজে পাওয়া যায়নি। আপডেট করা সম্ভব নয়।';
+    END IF;
+
+    -- Filter p_updates to only include fields a teacher is allowed to change.
+    -- For instance, a teacher should not be able to change their 'is_active' status or 'teacher_code'.
+    -- The 'update_teacher' RPC (called by admin) might allow more fields.
+    -- Here, we are defining what a teacher can self-update.
+    -- Keys must match the keys expected by the 'update_teacher' RPC (which are based on table columns usually).
+    
+    -- Ensure p_updates is not null, initialize to empty JSON object if it is
+    IF p_updates IS NULL THEN
+        p_updates := '{}'::JSONB;
+    END IF;
+
+    v_allowed_updates := jsonb_strip_nulls(jsonb_build_object(
+        'name_bn', p_updates->>'name_bn',
+        'name_en', p_updates->>'name_en',
+        -- 'mobile', p_updates->>'mobile', -- Typically fixed after verification
+        -- 'nid_number', p_updates->>'nid_number', -- Typically fixed after verification
+        -- 'email', p_updates->>'email', -- Typically fixed (auth email)
+        'date_of_birth', p_updates->>'date_of_birth',
+        'gender', p_updates->>'gender',
+        'photo_url', p_updates->>'photo_url', -- If 'photo_url' key exists, pass it (can be null to remove)
+        'payment_info', p_updates->'payment_info',
+        'address_details', p_updates->'address_details', -- Assuming teachers can update their address
+        'educational_qualification', p_updates->>'educational_qualification', -- Assuming UUID is passed
+        'kitabi_qualification', p_updates->'kitabi_qualification', -- Assuming array of UUIDs
+        'expertise_areas', p_updates->'expertise_areas', -- Assuming array of TEXT
+        'notes', p_updates->>'notes'
+        -- DO NOT INCLUDE: teacher_code, is_active, registered_by
+    ));
+    
+    -- If photo_url is explicitly passed as null in p_updates, ensure it's preserved in v_allowed_updates
+    IF p_updates ? 'photo_url' AND p_updates->>'photo_url' IS NULL THEN
+        v_allowed_updates := v_allowed_updates || jsonb_build_object('photo_url', null);
+    END IF;
+
+
+    -- Call the existing update_teacher function, which handles detailed validation and updates.
+    -- The `update_teacher` function needs to be designed to handle partial updates gracefully (e.g., using COALESCE for fields not provided in `v_allowed_updates`).
+    SELECT * INTO v_updated_teacher FROM public.update_teacher(v_teacher_id_from_mapping, v_allowed_updates);
+
+    RETURN v_updated_teacher;
+EXCEPTION
+    WHEN others THEN
+        RAISE WARNING 'Error in update_my_teacher_profile: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RAISE;
+END;
+$$;
+
+-- Grant execute permission
+GRANT EXECUTE ON FUNCTION public.update_my_teacher_profile(JSONB) TO authenticated;

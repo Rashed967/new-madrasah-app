@@ -1,0 +1,77 @@
+
+
+CREATE OR REPLACE FUNCTION public.get_individual_result_details(
+    p_exam_id UUID,
+    p_marhala_id UUID,
+    p_roll_number INTEGER,
+    p_registration_number INTEGER
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_examinee_id UUID;
+    v_result JSONB;
+BEGIN
+    -- Find the examinee by exam, marhala, roll, and registration number
+    SELECT id INTO v_examinee_id
+    FROM public.examinees ex
+    WHERE ex.exam_id = p_exam_id 
+      AND ex.marhala_id = p_marhala_id
+      AND ex.roll_number = p_roll_number
+      AND ex.registration_number = p_registration_number;
+
+    IF v_examinee_id IS NULL THEN
+        RETURN NULL; -- Or RAISE EXCEPTION 'Examinee not found';
+    END IF;
+
+    -- Build the final JSON object
+    SELECT jsonb_build_object(
+        'examinee_details', jsonb_build_object(
+            'name_bn', ex.name_bn,
+            'father_name_bn', ex.father_name_bn,
+            'roll_number', ex.roll_number,
+            'registration_number', ex.registration_number
+        ),
+        'madrasa_details', jsonb_build_object(
+            'name_bn', mad.name_bn,
+            'madrasa_code', mad.madrasa_code
+        ),
+        'marhala_details', jsonb_build_object(
+            'name_bn', mar.name_bn
+        ),
+        'exam_details', jsonb_build_object(
+            'name', exam.name
+        ),
+        'result_summary', jsonb_build_object(
+            'total_marks', er.total_marks,
+            'percentage', er.percentage,
+            'grade', er.grade,
+            'status', er.status
+        ),
+        'subject_marks', (
+            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                'kitab_name', k.name_bn,
+                'full_marks', k.full_marks,
+                'obtained_marks', m.obtained_marks
+            ) ORDER BY k.kitab_code), '[]'::jsonb)
+            FROM public.marks m
+            JOIN public.kitabs k ON m.kitab_id = k.id
+            WHERE m.examinee_id = v_examinee_id AND m.exam_id = p_exam_id
+        )
+    )
+    INTO v_result
+    FROM public.examinees ex
+    JOIN public.madrasas mad ON ex.madrasa_id = mad.id
+    JOIN public.marhalas mar ON ex.marhala_id = mar.id
+    JOIN public.exams exam ON ex.exam_id = exam.id
+    LEFT JOIN public.exam_results er ON ex.id = er.examinee_id AND ex.exam_id = er.exam_id
+    WHERE ex.id = v_examinee_id;
+
+    RETURN v_result;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_individual_result_details(UUID, UUID, INTEGER, INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_individual_result_details(UUID, UUID, INTEGER, INTEGER) TO anon;

@@ -1,0 +1,130 @@
+-- This function is for debugging purposes to trace why no examinees are being returned.
+-- It checks each condition of the main query step-by-step and returns a JSONB object with the results.
+
+CREATE OR REPLACE FUNCTION public.debug_undistributed_scripts(
+    p_exam_id UUID,
+    p_marhala_id UUID,
+    p_kitab_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_debug_log JSONB := '{}'::JSONB;
+    v_exam_exists BOOLEAN;
+    v_marhala_exists BOOLEAN;
+    v_kitab_exists BOOLEAN;
+    v_is_kitab_in_marhala BOOLEAN;
+    v_initial_examinee_count INTEGER;
+    v_assigned_to_markaz_count INTEGER;
+    v_final_eligible_count INTEGER;
+    v_already_distributed_count INTEGER;
+    v_conclusion TEXT;
+BEGIN
+    -- Step 1: Check if the provided IDs are valid and exist in their tables
+    SELECT EXISTS(SELECT 1 FROM public.exams WHERE id = p_exam_id) INTO v_exam_exists;
+    SELECT EXISTS(SELECT 1 FROM public.marhalas WHERE id = p_marhala_id) INTO v_marhala_exists;
+    SELECT EXISTS(SELECT 1 FROM public.kitabs WHERE id = p_kitab_id) INTO v_kitab_exists;
+    v_debug_log := v_debug_log || jsonb_build_object(
+        'step1_parameter_check', jsonb_build_object(
+            'exam_found', v_exam_exists,
+            'marhala_found', v_marhala_exists,
+            'kitab_found', v_kitab_exists
+        )
+    );
+    IF NOT v_exam_exists OR NOT v_marhala_exists OR NOT v_kitab_exists THEN
+        v_conclusion := 'Parameter check failed. One of the provided IDs (Exam, Marhala, or Kitab) does not exist in the database.';
+        v_debug_log := v_debug_log || jsonb_build_object('final_conclusion', v_conclusion);
+        RETURN v_debug_log;
+    END IF;
+
+    -- Step 2: Check if the Kitab is in the Marhala's syllabus (kitab_ids array)
+    SELECT p_kitab_id = ANY(kitab_ids) INTO v_is_kitab_in_marhala
+    FROM public.marhalas WHERE id = p_marhala_id;
+    v_debug_log := v_debug_log || jsonb_build_object(
+        'step2_syllabus_check', jsonb_build_object(
+            'is_kitab_in_marhala_syllabus', v_is_kitab_in_marhala
+        )
+    );
+    IF NOT v_is_kitab_in_marhala THEN
+        v_conclusion := 'Syllabus check failed. The selected Kitab is not part of the selected Marhala''s curriculum (kitab_ids).';
+        v_debug_log := v_debug_log || jsonb_build_object('final_conclusion', v_conclusion);
+        RETURN v_debug_log;
+    END IF;
+
+    -- Step 3: Count examinees for the given exam and marhala with the 'roll_assigned' status
+    SELECT COUNT(*) INTO v_initial_examinee_count
+    FROM public.examinees ex
+    WHERE ex.exam_id = p_exam_id
+      AND ex.marhala_id = p_marhala_id
+      AND ex.status = 'roll_assigned';
+    v_debug_log := v_debug_log || jsonb_build_object(
+        'step3_examinee_status_check', jsonb_build_object(
+            'examinees_with_correct_status_and_marhala', v_initial_examinee_count
+        )
+    );
+    IF v_initial_examinee_count = 0 THEN
+        v_conclusion := 'Examinee check failed. No examinees found for this Exam and Marhala with the status "roll_assigned".';
+        v_debug_log := v_debug_log || jsonb_build_object('final_conclusion', v_conclusion);
+        RETURN v_debug_log;
+    END IF;
+    
+    -- Step 4: Count how many of those examinees are assigned to ANY Markaz for this Exam.
+    SELECT COUNT(DISTINCT ex.id) INTO v_assigned_to_markaz_count
+    FROM public.examinees ex
+    JOIN public.markaz_madrasa_marhala_assignments mma 
+        ON ex.madrasa_id = mma.madrasa_id 
+        AND ex.marhala_id = mma.marhala_id 
+        AND ex.exam_id = mma.exam_id
+    WHERE ex.exam_id = p_exam_id
+      AND ex.marhala_id = p_marhala_id
+      AND ex.status = 'roll_assigned';
+    v_debug_log := v_debug_log || jsonb_build_object(
+        'step4_markaz_assignment_check', jsonb_build_object(
+            'examinees_with_markaz_assignment', v_assigned_to_markaz_count
+        )
+    );
+    IF v_assigned_to_markaz_count = 0 THEN
+        v_conclusion := 'Markaz assignment check failed. No examinees from this group are assigned to a Markaz for this exam.';
+        v_debug_log := v_debug_log || jsonb_build_object('final_conclusion', v_conclusion);
+        RETURN v_debug_log;
+    END IF;
+
+    -- Step 5: Check how many of the potentially eligible examinees have already been distributed
+    SELECT COUNT(*) INTO v_already_distributed_count
+    FROM public.distributed_script_details dsd
+    WHERE dsd.exam_id = p_exam_id
+      AND dsd.kitab_id = p_kitab_id
+      AND dsd.examinee_id IN (
+        SELECT ex.id FROM public.examinees ex
+        WHERE ex.exam_id = p_exam_id AND ex.marhala_id = p_marhala_id
+      );
+    v_debug_log := v_debug_log || jsonb_build_object(
+        'step5_already_distributed_check', jsonb_build_object(
+            'scripts_already_distributed', v_already_distributed_count
+        )
+    );
+    
+    -- Step 6: Final check - run the main query logic and count the results
+    SELECT COUNT(*) INTO v_final_eligible_count
+    FROM public.get_undistributed_scripts_for_distribution(p_exam_id, p_marhala_id, p_kitab_id);
+    v_debug_log := v_debug_log || jsonb_build_object(
+        'step6_final_result_count', v_final_eligible_count
+    );
+
+    -- Final Conclusion
+    IF v_final_eligible_count = 0 THEN
+        v_conclusion := 'All checks passed, but the final query returns 0 results. This suggests a subtle issue in the JOIN logic of the main function or data inconsistency (e.g., missing markaz record).';
+    ELSE
+        v_conclusion := 'Success. The query should return results. If the UI still shows nothing, the issue might be on the frontend.';
+    END IF;
+    
+    v_debug_log := v_debug_log || jsonb_build_object('final_conclusion', v_conclusion);
+
+    RETURN v_debug_log;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.debug_undistributed_scripts(UUID, UUID, UUID) TO authenticated;

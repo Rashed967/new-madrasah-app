@@ -1,0 +1,78 @@
+-- Ensure the handle_updated_at function exists (create if not)
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at() ... (if not already created)
+
+CREATE TABLE IF NOT EXISTS public.teachers ( 
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    teacher_code TEXT UNIQUE NOT NULL, 
+    name_bn TEXT NOT NULL,
+    name_en TEXT, 
+    mobile TEXT UNIQUE NOT NULL, -- Changed back to NOT NULL
+    nid_number TEXT UNIQUE, 
+    email TEXT UNIQUE, 
+    date_of_birth DATE, 
+    gender TEXT CHECK (gender IN ('male', 'female', 'other')), 
+    photo_url TEXT, 
+    payment_info JSONB, 
+    address_details JSONB, 
+    educational_qualification UUID REFERENCES public.marhalas(id), 
+    kitabi_qualification UUID[], 
+    expertise_areas TEXT[], 
+    notes TEXT,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    registered_by UUID REFERENCES auth.users(id), 
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_teachers_teacher_code ON public.teachers(teacher_code); 
+CREATE INDEX IF NOT EXISTS idx_teachers_mobile ON public.teachers(mobile); 
+CREATE INDEX IF NOT EXISTS idx_teachers_nid_number ON public.teachers(nid_number); 
+CREATE INDEX IF NOT EXISTS idx_teachers_email ON public.teachers(email); 
+CREATE INDEX IF NOT EXISTS idx_teachers_is_active ON public.teachers(is_active); 
+CREATE INDEX IF NOT EXISTS idx_teachers_edu_qual_marhala ON public.teachers(educational_qualification); 
+CREATE INDEX IF NOT EXISTS idx_teachers_kitabi_qual_kitabs ON public.teachers USING GIN (kitabi_qualification); 
+CREATE INDEX IF NOT EXISTS idx_teachers_gender ON public.teachers(gender);
+
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_teachers_updated ON public.teachers; 
+CREATE TRIGGER on_teachers_updated 
+BEFORE UPDATE ON public.teachers 
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies
+ALTER TABLE public.teachers ENABLE ROW LEVEL SECURITY; 
+
+-- Admins have full access
+CREATE POLICY "Allow admin full access for teachers"  
+  ON public.teachers 
+  FOR ALL TO authenticated 
+  USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+  WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+-- Teachers can select their own record
+CREATE POLICY "Teachers can select their own profile"
+  ON public.teachers
+  FOR SELECT TO authenticated
+  USING (EXISTS (
+    SELECT 1 FROM public.teacher_user_mapping tum 
+    WHERE tum.user_id = auth.uid() AND tum.teacher_id = public.teachers.id
+  ));
+
+-- Teachers can update their own record (specific columns might be restricted further by RPC logic)
+CREATE POLICY "Teachers can update their own profile"
+  ON public.teachers
+  FOR UPDATE TO authenticated
+  USING (EXISTS (
+    SELECT 1 FROM public.teacher_user_mapping tum 
+    WHERE tum.user_id = auth.uid() AND tum.teacher_id = public.teachers.id
+  ))
+  WITH CHECK (EXISTS (
+    SELECT 1 FROM public.teacher_user_mapping tum 
+    WHERE tum.user_id = auth.uid() AND tum.teacher_id = public.teachers.id
+  ));
+  
+-- Teachers should not be able to delete their own profiles directly. Deletion should be admin-only.
+-- The admin policy already covers DELETE for admins.

@@ -1,0 +1,75 @@
+
+-- Function: public.search_available_teachers_for_assignment
+-- Purpose: Search for teachers available for assignment to a specific role in an exam.
+-- Parameters: p_search_term, p_exam_id, p_assigned_role, p_page, p_limit
+-- Returns: JSONB { items: TeacherDbRow[], total_items: INTEGER }
+
+CREATE OR REPLACE FUNCTION public.search_available_teachers_for_assignment(
+    p_search_term TEXT,
+    p_exam_id UUID,
+    p_assigned_role TEXT, -- 'negran' or 'mumtahin'
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    _offset INTEGER;
+    _items JSONB;
+    _total_items INTEGER;
+    _query TEXT;
+    _count_query TEXT;
+    _where_clauses TEXT[] := ARRAY['t.is_active = TRUE']; -- Start with basic active check
+    _search_condition TEXT;
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    IF p_exam_id IS NULL THEN
+        RAISE EXCEPTION 'Exam ID is required.';
+    END IF;
+    IF p_assigned_role IS NULL OR p_assigned_role = '' THEN
+        RAISE EXCEPTION 'Assigned role is required.';
+    END IF;
+
+    -- Exclude teachers already assigned to this specific role in this specific exam
+    _where_clauses := array_append(_where_clauses,
+        format(
+            't.id NOT IN (SELECT epa.personnel_id FROM public.exam_personnel_assignments epa WHERE epa.exam_id = %L AND epa.assigned_role = %L)',
+            p_exam_id,
+            p_assigned_role
+        )
+    );
+    
+    -- Search term filter (applied after exclusion for relevance)
+    IF p_search_term IS NOT NULL AND TRIM(p_search_term) <> '' THEN
+        _search_condition := format(
+            '(t.name_bn ILIKE %1$L OR t.teacher_code ILIKE %1$L OR t.mobile ILIKE %1$L OR t.nid_number ILIKE %1$L)',
+            '%' || TRIM(p_search_term) || '%'
+        );
+        _where_clauses := array_append(_where_clauses, _search_condition);
+    END IF;
+
+    -- Count query based on the final where clauses
+    _count_query := 'SELECT COUNT(DISTINCT t.id) FROM public.teachers t WHERE ' || array_to_string(_where_clauses, ' AND ');
+    EXECUTE _count_query INTO _total_items;
+
+    -- Main data query
+    _query := '
+        SELECT DISTINCT t.id, t.teacher_code, t.name_bn, t.name_en, t.mobile, t.nid_number, t.email,
+               t.date_of_birth, t.gender, t.photo_url, t.payment_info,
+               t.address_details,
+               t.educational_qualification, t.kitabi_qualification, t.expertise_areas,
+               t.notes, t.is_active, t.registered_by, t.created_at, t.updated_at
+        FROM public.teachers t
+        WHERE ' || array_to_string(_where_clauses, ' AND ') || '
+        ORDER BY t.name_bn ASC
+        LIMIT ' || p_limit || ' OFFSET ' || _offset;
+
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _query || ') q' INTO _items;
+
+    RETURN jsonb_build_object('items', _items, 'total_items', _total_items);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.search_available_teachers_for_assignment(TEXT, UUID, TEXT, INTEGER, INTEGER) TO authenticated;

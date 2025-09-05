@@ -1,0 +1,31 @@
+
+CREATE OR REPLACE FUNCTION public.get_certificate_application_status(
+    p_application_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_result JSONB;
+BEGIN
+    SELECT
+        jsonb_build_object(
+            'id', ca.id,
+            'application_status', ca.application_status,
+            'created_at', ca.created_at,
+            'examinee_name', ex.name_bn,
+            'exam_name', e.name,
+            'applied_certificates', ca.applied_certificates
+        )
+    INTO v_result
+    FROM public.certificate_applications ca
+    JOIN public.examinees ex ON ca.examinee_id = ex.id
+    JOIN public.exams e ON ca.exam_id = e.id
+    WHERE ca.id = p_application_id;
+
+    RETURN v_result;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_certificate_application_status(UUID) TO anon, authenticated;

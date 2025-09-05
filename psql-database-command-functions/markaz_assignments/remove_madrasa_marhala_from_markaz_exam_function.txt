@@ -1,0 +1,38 @@
+
+CREATE OR REPLACE FUNCTION public.remove_madrasa_marhala_from_markaz_exam(
+    p_assignment_id UUID DEFAULT NULL, -- Can delete by specific assignment ID
+    p_exam_id UUID DEFAULT NULL,       -- Or by exam, madrasa, marhala combination
+    p_madrasa_id UUID DEFAULT NULL,
+    p_marhala_id UUID DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+    v_current_user_id UUID;
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'মারকায থেকে মাদরাসা/মারহালা এসাইনমেন্ট সরানোর অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_assignment_id IS NOT NULL THEN
+        DELETE FROM public.markaz_madrasa_marhala_assignments WHERE id = p_assignment_id;
+    ELSIF p_exam_id IS NOT NULL AND p_madrasa_id IS NOT NULL AND p_marhala_id IS NOT NULL THEN
+        DELETE FROM public.markaz_madrasa_marhala_assignments 
+        WHERE exam_id = p_exam_id AND madrasa_id = p_madrasa_id AND marhala_id = p_marhala_id;
+    ELSE
+        RAISE EXCEPTION 'এসাইনমেন্ট সরানোর জন্য হয় এসাইনমেন্ট আইডি অথবা পরীক্ষা, মাদরাসা ও মারহালা আইডি সবগুলোই দিন।';
+    END IF;
+
+    IF NOT FOUND THEN
+        RAISE WARNING 'কোনো এসাইনমেন্ট খুঁজে পাওয়া যায়নি অথবা মোছার জন্য সঠিক প্যারামিটার দেওয়া হয়নি।';
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.remove_madrasa_marhala_from_markaz_exam(UUID, UUID, UUID, UUID) TO authenticated;

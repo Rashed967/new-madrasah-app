@@ -1,0 +1,33 @@
+
+CREATE OR REPLACE FUNCTION public.reject_madrasa_application(
+    p_application_id uuid,
+    p_review_notes TEXT DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_user_role TEXT;
+BEGIN
+  -- 1. Check admin role
+  if not (select role from public.user_profiles where id = auth.uid()) in ('admin', 'super_admin') then
+    raise exception 'অনুমোদনের অনুমতি নেই।';
+  end if;
+
+  -- 2. Update application status to 'rejected'
+  UPDATE public.madrasa_applications
+  SET 
+    application_status = 'rejected',
+    review_notes = p_review_notes,
+    reviewed_by = auth.uid()
+  WHERE id = p_application_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'আবেদন আইডি (%) খুঁজে পাওয়া যায়নি।', p_application_id;
+  END IF;
+
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.reject_madrasa_application(uuid, text) TO authenticated;

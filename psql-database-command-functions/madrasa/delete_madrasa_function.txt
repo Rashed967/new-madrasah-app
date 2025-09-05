@@ -1,0 +1,40 @@
+
+CREATE OR REPLACE FUNCTION public.delete_madrasa(p_madrasa_id UUID)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+    v_current_user_id UUID;
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'মাদরাসা মুছে ফেলার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_madrasa_id IS NULL THEN
+        RAISE EXCEPTION 'মাদরাসা আইডি আবশ্যক।';
+    END IF;
+
+    -- TODO: Add checks for related data if cascading delete is not desired or if specific error messages are needed.
+    -- For example, check if this madrasa is referenced in 'markazes' or 'examinees'.
+    -- IF EXISTS (SELECT 1 FROM public.markazes WHERE markaz_madrasa_id = p_madrasa_id::text OR p_madrasa_id::text = ANY(affiliated_madrasa_ids)) THEN
+    --     RAISE EXCEPTION 'এই মাদরাসাটি এক বা একাধিক মারকাযে ব্যবহৃত হয়েছে। প্রথমে মারকায থেকে মাদরাসাটি সরান।';
+    -- END IF;
+    -- IF EXISTS (SELECT 1 FROM public.examinees WHERE madrasa_id = p_madrasa_id::text) THEN
+    --     RAISE EXCEPTION 'এই মাদরাসার অধীনে পরীক্ষার্থী রয়েছে। প্রথমে পরীক্ষার্থীদের তথ্য মুছুন বা স্থানান্তর করুন।';
+    -- END IF;
+
+
+    DELETE FROM public.madrasas WHERE id = p_madrasa_id;
+
+    IF NOT FOUND THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো মাদরাসা পাওয়া যায়নি, তাই কিছুই মোছা হয়নি।', p_madrasa_id;
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.delete_madrasa(UUID) TO authenticated;

@@ -1,0 +1,51 @@
+CREATE OR REPLACE FUNCTION public.update_kitab(
+    p_id UUID,
+    p_name_bn TEXT,
+    p_name_ar TEXT,
+    p_full_marks INTEGER
+)
+RETURNS kitabs -- Return the updated row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_kitab kitabs%ROWTYPE;
+BEGIN
+    -- Input validation
+    IF p_id IS NULL THEN
+        RAISE EXCEPTION 'কিতাব আইডি আবশ্যক (Kitab ID is required)';
+    END IF;
+    IF p_name_bn IS NULL OR p_name_bn = '' THEN
+        RAISE EXCEPTION 'কিতাবের বাংলা নাম আবশ্যক (Bengali name is required)';
+    END IF;
+    IF p_full_marks IS NULL OR p_full_marks <= 0 THEN
+        RAISE EXCEPTION 'পূর্ণ নম্বর একটি ধনাত্মক সংখ্যা হতে হবে (Full marks must be a positive number)';
+    END IF;
+
+    -- Check for duplicate Bengali name (excluding the current kitab being updated)
+    PERFORM 1 FROM public.kitabs WHERE name_bn = p_name_bn AND id <> p_id;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই বাংলা নামে অন্য একটি কিতাব ইতিমধ্যে বিদ্যমান: "%"', p_name_bn
+        USING ERRCODE = '23505', DETAIL = 'Duplicate kitab name_bn for update', HINT = 'অন্য নাম ব্যবহার করুন (Use a different name)';
+    END IF;
+
+    -- Update the kitab
+    UPDATE public.kitabs
+    SET 
+        name_bn = p_name_bn,
+        name_ar = p_name_ar, -- Allow NULL for Arabic name
+        full_marks = p_full_marks,
+        updated_at = NOW() -- Assuming you have an updated_at column handled by trigger or manually here
+    WHERE id = p_id
+    RETURNING * INTO v_updated_kitab;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত আইডি (%) সহ কোনো কিতাব পাওয়া যায়নি।', p_id;
+    END IF;
+
+    RETURN v_updated_kitab;
+END;
+$$;
+
+-- Grant execute permission
+GRANT EXECUTE ON FUNCTION public.update_kitab(UUID, TEXT, TEXT, INTEGER) TO authenticated;

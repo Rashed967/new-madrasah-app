@@ -1,0 +1,7 @@
+-- নিবন্ধন ফি সংগ্রহের সময় প্রতিটি মারহালার জন্য তথ্যমূলক নিবন্ধন নম্বর রেঞ্জ সংরক্ষণের জন্য কলাম যোগ করা হচ্ছে।
+ALTER TABLE public.registration_fee_marhala_counts
+ADD COLUMN IF NOT EXISTS registration_number_range_start INTEGER,
+ADD COLUMN IF NOT EXISTS registration_number_range_end INTEGER;
+
+COMMENT ON COLUMN public.registration_fee_marhala_counts.registration_number_range_start IS 'ফি সংগ্রহের সময় এই মারহালার জন্য তথ্যমূলকভাবে দেখানো নিবন্ধন শুরুর নম্বর।';
+COMMENT ON COLUMN public.registration_fee_marhala_counts.registration_number_range_end IS 'ফি সংগ্রহের সময় এই মারহালার জন্য তথ্যমূলকভাবে দেখানো নিবন্ধন শেষের নম্বর।';

@@ -1,0 +1,38 @@
+-- Stores the generated merit list for each marhala within an exam.
+
+CREATE TABLE IF NOT EXISTS public.merit_lists (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    exam_id UUID NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+    marhala_id UUID NOT NULL REFERENCES public.marhalas(id) ON DELETE CASCADE,
+    examinee_id UUID NOT NULL REFERENCES public.examinees(id) ON DELETE CASCADE,
+    "rank" INTEGER NOT NULL, -- The numeric rank (e.g., 1, 2, 3)
+    position_details TEXT, -- The display rank, e.g., '1st', '2nd (ক)', '3rd'
+    total_marks INTEGER NOT NULL,
+    percentage NUMERIC(5, 2) NOT NULL,
+    grade TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+
+    CONSTRAINT unique_merit_list_entry UNIQUE (exam_id, marhala_id, examinee_id)
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_merit_lists_exam_marhala ON public.merit_lists(exam_id, marhala_id);
+CREATE INDEX IF NOT EXISTS idx_merit_lists_examinee_id ON public.merit_lists(examinee_id);
+CREATE INDEX IF NOT EXISTS idx_merit_lists_rank ON public.merit_lists("rank");
+
+
+-- RLS Policies
+ALTER TABLE public.merit_lists ENABLE ROW LEVEL SECURITY;
+
+-- Admins have full access
+CREATE POLICY "Allow admin full access for merit_lists"
+  ON public.merit_lists
+  FOR ALL TO authenticated
+  USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+  WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+-- Allow authenticated users to read merit lists
+CREATE POLICY "Allow authenticated read access for merit_lists"
+  ON public.merit_lists
+  FOR SELECT TO authenticated
+  USING (true);

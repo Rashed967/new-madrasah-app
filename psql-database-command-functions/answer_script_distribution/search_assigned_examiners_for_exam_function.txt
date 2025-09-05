@@ -1,0 +1,52 @@
+
+CREATE OR REPLACE FUNCTION public.search_assigned_examiners_for_exam(
+    p_exam_id UUID,
+    p_search_term TEXT DEFAULT NULL,
+    p_limit INTEGER DEFAULT 20,
+    p_page INTEGER DEFAULT 1
+)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+DECLARE
+    _offset INTEGER;
+    _items JSONB;
+    _total_items INTEGER;
+    _query TEXT;
+    _count_query TEXT;
+    _where_clauses TEXT[] := ARRAY['epa.exam_id = $1', 'epa.assigned_role = ''mumtahin'''];
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    IF p_search_term IS NOT NULL AND TRIM(p_search_term) <> '' THEN
+        _where_clauses := array_append(_where_clauses, format(
+            '(t.name_bn ILIKE %1$L OR t.teacher_code ILIKE %1$L)',
+            '%' || TRIM(p_search_term) || '%'
+        ));
+    END IF;
+
+    _count_query := '
+        SELECT COUNT(DISTINCT t.id)
+        FROM public.teachers t
+        JOIN public.exam_personnel_assignments epa ON t.id = epa.personnel_id
+        WHERE ' || array_to_string(_where_clauses, ' AND ');
+
+    EXECUTE _count_query USING p_exam_id INTO _total_items;
+
+    _query := '
+        SELECT jsonb_agg(jsonb_build_object(''value'', sub.id, ''label'', sub.name_bn || '' ('' || sub.teacher_code || '')'', ''code'', sub.teacher_code))
+        FROM (
+            SELECT DISTINCT t.id, t.name_bn, t.teacher_code
+            FROM public.teachers t
+            JOIN public.exam_personnel_assignments epa ON t.id = epa.personnel_id
+            WHERE ' || array_to_string(_where_clauses, ' AND ') || '
+            ORDER BY t.name_bn
+            LIMIT ' || p_limit || ' OFFSET ' || _offset || '
+        ) AS sub';
+    
+    EXECUTE _query USING p_exam_id INTO _items;
+
+    RETURN jsonb_build_object('items', COALESCE(_items, '[]'::jsonb), 'total_items', _total_items);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.search_assigned_examiners_for_exam(UUID, TEXT, INTEGER, INTEGER) TO authenticated;

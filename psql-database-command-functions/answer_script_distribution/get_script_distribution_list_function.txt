@@ -1,0 +1,95 @@
+CREATE OR REPLACE FUNCTION public.get_script_distribution_list(
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10,
+    p_search_term TEXT DEFAULT NULL, -- Search by examiner name/code
+    p_exam_id_filter UUID DEFAULT NULL,
+    p_marhala_id_filter UUID DEFAULT NULL, -- New
+    p_kitab_id_filter UUID DEFAULT NULL,   -- New
+    p_markaz_id_filter UUID DEFAULT NULL,  -- New
+    p_madrasa_id_filter UUID DEFAULT NULL  -- New
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+AS $$
+DECLARE
+    _offset INTEGER;
+    _items_jsonb JSONB;
+    _total_items INTEGER;
+    _base_query TEXT;
+    _data_query TEXT;
+    _count_query TEXT;
+    _where_clauses TEXT[] := ARRAY['TRUE'];
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    IF p_exam_id_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('d.exam_id = %L', p_exam_id_filter));
+    END IF;
+
+    IF p_marhala_id_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('d.marhala_id = %L', p_marhala_id_filter));
+    END IF;
+
+    IF p_kitab_id_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('d.kitab_id = %L', p_kitab_id_filter));
+    END IF;
+    
+    IF p_markaz_id_filter IS NOT NULL THEN
+        _where_clauses := array_append(_where_clauses, format('d.markaz_id = %L', p_markaz_id_filter));
+    END IF;
+
+    IF p_madrasa_id_filter IS NOT NULL THEN
+        -- Check if the madrasa_id exists in the madrasa_ids array
+        _where_clauses := array_append(_where_clauses, format('d.madrasa_ids @> ARRAY[%L::uuid]', p_madrasa_id_filter));
+    END IF;
+
+    IF p_search_term IS NOT NULL AND TRIM(p_search_term) <> '' THEN
+        _where_clauses := array_append(_where_clauses, format(
+            '(t.name_bn ILIKE %1$L OR t.teacher_code ILIKE %1$L)',
+            '%' || TRIM(p_search_term) || '%'
+        ));
+    END IF;
+
+    _base_query := '
+        FROM public.answer_script_distributions d
+        JOIN public.teachers t ON d.examiner_teacher_id = t.id
+        JOIN public.exams e ON d.exam_id = e.id
+        JOIN public.markazes mk ON d.markaz_id = mk.id
+        JOIN public.kitabs k ON d.kitab_id = k.id
+        JOIN public.marhalas mar ON d.marhala_id = mar.id
+        WHERE ' || array_to_string(_where_clauses, ' AND ');
+
+    _count_query := 'SELECT COUNT(d.id)' || _base_query;
+    EXECUTE _count_query INTO _total_items;
+
+    _data_query := '
+        WITH distribution_details AS (
+            SELECT
+                d.id as distribution_id,
+                d.distribution_date,
+                d.assigned_total_scripts_count,
+                t.name_bn as examiner_name_bn,
+                t.teacher_code as examiner_code,
+                e.name as exam_name,
+                mk.name_bn as markaz_name_bn,
+                k.name_bn as kitab_name_bn,
+                mar.name_bn as marhala_name_bn,
+                d.madrasa_ids 
+            ' || _base_query || '
+            ORDER BY d.distribution_date DESC
+            LIMIT ' || p_limit || ' OFFSET ' || _offset || '
+        )
+        SELECT
+            dd.*,
+            (SELECT jsonb_agg(m.name_bn) FROM public.madrasas m WHERE m.id = ANY(dd.madrasa_ids)) as madrasa_names
+        FROM distribution_details dd
+        ';
+    
+    EXECUTE 'SELECT COALESCE(jsonb_agg(row_to_json(q)), ''[]''::jsonb) FROM (' || _data_query || ') q' INTO _items_jsonb;
+    
+    RETURN jsonb_build_object('items', _items_jsonb, 'totalItems', _total_items);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_script_distribution_list(INTEGER, INTEGER, TEXT, UUID, UUID, UUID, UUID, UUID) TO authenticated;

@@ -1,0 +1,78 @@
+
+
+-- handle_updated_at ফাংশন (যদি আগে তৈরি না হয়ে থাকে)
+CREATE OR REPLACE FUNCTION public.handle_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- madrasas টেবিল
+CREATE TABLE IF NOT EXISTS public.madrasas (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    madrasa_code INTEGER UNIQUE NOT NULL, -- SERIAL এর পরিবর্তে INTEGER
+    name_bn TEXT NOT NULL,
+    name_ar TEXT NOT NULL,
+    name_en TEXT,
+    address JSONB NOT NULL,
+    zone_id UUID NOT NULL REFERENCES public.zones(id),
+    mobile1 TEXT NOT NULL,
+    mobile2 TEXT,
+    type TEXT NOT NULL CHECK (type IN ('boys', 'girls', 'both')),
+    dispatch_method TEXT NOT NULL DEFAULT 'courier' CHECK (dispatch_method IN ('courier', 'post', 'both')),
+    highest_marhala_boys_id UUID REFERENCES public.marhalas(id),
+    highest_marhala_girls_id UUID REFERENCES public.marhalas(id),
+    muhtamim JSONB NOT NULL,
+    education_secretary JSONB,
+    mutawalli JSONB,
+    registration_date DATE NOT NULL,
+    ilhak_form_url TEXT,
+    user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL, -- New field
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+
+    -- Constraints to ensure marhala types match madrasa type
+    CONSTRAINT check_boys_marhala_for_boys_or_both_type CHECK (
+        (type = 'girls' AND highest_marhala_boys_id IS NULL) OR (type <> 'girls')
+    ),
+    CONSTRAINT check_girls_marhala_for_girls_or_both_type CHECK (
+        (type = 'boys' AND highest_marhala_girls_id IS NULL) OR (type <> 'boys')
+    ),
+    CONSTRAINT check_both_marhalas_for_both_type CHECK (
+        (type <> 'both') OR (type = 'both' AND highest_marhala_boys_id IS NOT NULL AND highest_marhala_girls_id IS NOT NULL)
+    ),
+    CONSTRAINT check_boys_marhala_for_boys_type CHECK (
+        (type <> 'boys') OR (type = 'boys' AND highest_marhala_boys_id IS NOT NULL)
+    ),
+    CONSTRAINT check_girls_marhala_for_girls_type CHECK (
+        (type <> 'girls') OR (type = 'girls' AND highest_marhala_girls_id IS NOT NULL)
+    )
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_madrasas_zone_id ON public.madrasas(zone_id);
+CREATE INDEX IF NOT EXISTS idx_madrasas_type ON public.madrasas(type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_madrasas_user_id_unique ON public.madrasas(user_id) WHERE user_id IS NOT NULL; -- New Index
+
+-- RLS Policies (example, adjust as needed)
+-- ALTER TABLE public.madrasas ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow public read access" ON public.madrasas FOR SELECT USING (true);
+-- CREATE POLICY "Allow insert for authenticated users" ON public.madrasas FOR INSERT TO authenticated WITH CHECK (true);
+-- CREATE POLICY "Allow update for admins" ON public.madrasas FOR UPDATE TO authenticated USING (
+--   (SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin')
+-- ) WITH CHECK (
+--   (SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin')
+-- );
+-- CREATE POLICY "Allow delete for super_admins" ON public.madrasas FOR DELETE TO authenticated USING (
+--   (SELECT role FROM public.user_profiles WHERE id = auth.uid()) = 'super_admin'
+-- );
+
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_madrasas_updated ON public.madrasas;
+CREATE TRIGGER on_madrasas_updated
+BEFORE UPDATE ON public.madrasas
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();

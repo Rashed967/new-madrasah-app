@@ -1,0 +1,47 @@
+
+CREATE OR REPLACE FUNCTION public.delete_markaz(p_markaz_id UUID)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+    v_current_user_id UUID;
+    v_markaz_exists BOOLEAN;
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'মারকায নিষ্ক্রিয়/সক্রিয় করার অনুমতি আপনার নেই।' USING ERRCODE = '42501'; -- permission_denied
+    END IF;
+
+    IF p_markaz_id IS NULL THEN
+        RAISE EXCEPTION 'মারকায আইডি আবশ্যক।';
+    END IF;
+
+    SELECT EXISTS (SELECT 1 FROM public.markazes WHERE id = p_markaz_id) INTO v_markaz_exists;
+    IF NOT v_markaz_exists THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো মারকায পাওয়া যায়নি।', p_markaz_id;
+        RETURN;
+    END IF;
+    
+    -- This function now performs a soft delete by setting is_active to false.
+    -- If you need a hard delete, create a separate function or modify this one with care.
+    UPDATE public.markazes
+    SET is_active = false,
+        updated_at = NOW()
+    WHERE id = p_markaz_id;
+
+    IF NOT FOUND THEN
+        -- This case should ideally not be reached if v_markaz_exists was true,
+        -- but included for robustness.
+        RAISE WARNING 'মারকায নিষ্ক্রিয় করার সময় আইডি (%) খুঁজে পাওয়া যায়নি।', p_markaz_id;
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.delete_markaz(UUID) TO authenticated;
+
+-- Consider creating a separate function to re-activate if needed:
+-- CREATE OR REPLACE FUNCTION public.activate_markaz(p_markaz_id UUID) ... SET is_active = true ... ;

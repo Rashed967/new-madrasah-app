@@ -1,0 +1,32 @@
+-- ===================================================================
+-- RPC Function: set_teacher_mumtahin_eligibility
+-- Purpose: Set or remove a teacher's eligibility to be a Mumtahin.
+-- ===================================================================
+CREATE OR REPLACE FUNCTION public.set_teacher_mumtahin_eligibility(
+    p_teacher_id UUID,
+    p_is_eligible BOOLEAN
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'এই কার্যক্রমের জন্য আপনার অনুমতি নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_is_eligible THEN
+        INSERT INTO public.teacher_general_designations (teacher_id, designation)
+        VALUES (p_teacher_id, 'MUMTAHIN_ELIGIBLE')
+        ON CONFLICT (teacher_id, designation) DO NOTHING;
+    ELSE
+        DELETE FROM public.teacher_general_designations
+        WHERE teacher_id = p_teacher_id AND designation = 'MUMTAHIN_ELIGIBLE';
+    END IF;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.set_teacher_mumtahin_eligibility(UUID, BOOLEAN) TO authenticated;

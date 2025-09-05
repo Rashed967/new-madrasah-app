@@ -1,0 +1,53 @@
+CREATE OR REPLACE FUNCTION public.get_undistributed_scripts_for_distribution_v2(
+    p_exam_id UUID,
+    p_marhala_id UUID,
+    p_kitab_id UUID
+)
+RETURNS TABLE (
+    examinee_id UUID,
+    registration_number INTEGER,
+    roll_number INTEGER,
+    examinee_name_bn TEXT,
+    madrasa_id UUID,
+    madrasa_name_bn TEXT,
+    madrasa_code TEXT,
+    markaz_id UUID,
+    markaz_name_bn TEXT
+)
+LANGUAGE sql STABLE SECURITY DEFINER AS $
+    SELECT
+        ex.id AS examinee_id,
+        ex.registration_number,
+        ex.roll_number,
+        ex.name_bn AS examinee_name_bn,
+        ex.madrasa_id,
+        mad.name_bn AS madrasa_name_bn,
+        mad.madrasa_code AS madrasa_code,
+        mma.markaz_id,
+        '' AS markaz_name_bn
+    FROM public.examinees ex
+    JOIN public.marhalas mar ON ex.marhala_id = mar.id
+    JOIN public.madrasas mad ON ex.madrasa_id = mad.id
+    JOIN public.markaz_madrasa_marhala_assignments mma
+        ON ex.madrasa_id = mma.madrasa_id
+        AND ex.marhala_id = mma.marhala_id
+        AND ex.exam_id = mma.exam_id
+    WHERE
+        ex.exam_id = p_exam_id
+      AND
+        ex.marhala_id = p_marhala_id
+      AND
+        p_kitab_id = ANY(mar.kitab_ids)
+      AND
+        ex.roll_number IS NOT NULL
+      AND NOT EXISTS ( -- The crucial check: not already distributed for this specific exam and kitab
+          SELECT 1
+          FROM public.distributed_script_details dsd
+          WHERE dsd.examinee_id = ex.id
+            AND dsd.exam_id = p_exam_id
+            AND dsd.kitab_id = p_kitab_id
+      )
+    ORDER BY ex.roll_number ASC NULLS LAST;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_undistributed_scripts_for_distribution_v2(UUID, UUID, UUID) TO authenticated;

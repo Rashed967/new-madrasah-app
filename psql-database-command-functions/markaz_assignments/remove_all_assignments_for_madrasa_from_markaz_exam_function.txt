@@ -1,0 +1,40 @@
+
+CREATE OR REPLACE FUNCTION public.remove_all_assignments_for_madrasa_from_markaz_exam(
+    p_markaz_id UUID,
+    p_exam_id UUID,
+    p_madrasa_id UUID
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+    v_current_user_id UUID;
+    v_deleted_count INTEGER;
+BEGIN
+    v_current_user_id := auth.uid();
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'মারকায থেকে মাদরাসার সকল এসাইনমেন্ট সরানোর অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF p_markaz_id IS NULL OR p_exam_id IS NULL OR p_madrasa_id IS NULL THEN
+        RAISE EXCEPTION 'মারকায, পরীক্ষা, এবং মাদরাসা আইডি সবগুলোই আবশ্যক।';
+    END IF;
+
+    DELETE FROM public.markaz_madrasa_marhala_assignments
+    WHERE markaz_id = p_markaz_id 
+      AND exam_id = p_exam_id 
+      AND madrasa_id = p_madrasa_id;
+
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+
+    IF v_deleted_count = 0 THEN
+        RAISE WARNING 'এই মাদরাসার জন্য এই মারকাযে ও পরীক্ষায় কোনো এসাইনমেন্ট খুঁজে পাওয়া যায়নি। কিছুই মোছা হয়নি।';
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.remove_all_assignments_for_madrasa_from_markaz_exam(UUID, UUID, UUID) TO authenticated;

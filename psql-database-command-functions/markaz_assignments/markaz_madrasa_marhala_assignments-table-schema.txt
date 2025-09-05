@@ -1,0 +1,51 @@
+
+-- Ensure the handle_updated_at function exists
+-- CREATE OR REPLACE FUNCTION public.handle_updated_at() ... (if not already created)
+
+CREATE TABLE IF NOT EXISTS public.markaz_madrasa_marhala_assignments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    markaz_id UUID NOT NULL REFERENCES public.markazes(id) ON DELETE CASCADE,
+    exam_id UUID NOT NULL, -- Will add FK constraint once 'exams' table schema is stable
+    madrasa_id UUID NOT NULL REFERENCES public.madrasas(id) ON DELETE CASCADE,
+    marhala_id UUID NOT NULL REFERENCES public.marhalas(id) ON DELETE CASCADE,
+    -- Optional: Add any specific data for this assignment, e.g., capacity_override_for_this_assignment INTEGER
+
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+
+    -- Ensure that for a given exam, a specific madrasa's marhala can only be assigned to one markaz.
+    CONSTRAINT unique_exam_madrasa_marhala_assignment UNIQUE (exam_id, madrasa_id, marhala_id) 
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_mmma_markaz_id ON public.markaz_madrasa_marhala_assignments(markaz_id);
+CREATE INDEX IF NOT EXISTS idx_mmma_exam_id ON public.markaz_madrasa_marhala_assignments(exam_id);
+CREATE INDEX IF NOT EXISTS idx_mmma_madrasa_id ON public.markaz_madrasa_marhala_assignments(madrasa_id);
+CREATE INDEX IF NOT EXISTS idx_mmma_marhala_id ON public.markaz_madrasa_marhala_assignments(marhala_id);
+CREATE INDEX IF NOT EXISTS idx_mmma_exam_markaz ON public.markaz_madrasa_marhala_assignments(exam_id, markaz_id);
+
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_markaz_madrasa_marhala_assignments_updated ON public.markaz_madrasa_marhala_assignments;
+CREATE TRIGGER on_markaz_madrasa_marhala_assignments_updated
+BEFORE UPDATE ON public.markaz_madrasa_marhala_assignments
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies (Example - adjust to your security model)
+-- ALTER TABLE public.markaz_madrasa_marhala_assignments ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow all access for admins for markaz_assignments" 
+-- ON public.markaz_madrasa_marhala_assignments
+-- FOR ALL TO authenticated 
+-- USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+-- WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));
+
+-- CREATE POLICY "Allow read for authenticated users for markaz_assignments"
+-- ON public.markaz_madrasa_marhala_assignments
+-- FOR SELECT TO authenticated
+-- USING (true);
+
+-- Add FOREIGN KEY constraint for exam_id AFTER 'exams' table is created and populated.
+-- Example:
+-- ALTER TABLE public.markaz_madrasa_marhala_assignments
+-- ADD CONSTRAINT fk_mmma_exam_id FOREIGN KEY (exam_id) REFERENCES public.exams(id) ON DELETE CASCADE;

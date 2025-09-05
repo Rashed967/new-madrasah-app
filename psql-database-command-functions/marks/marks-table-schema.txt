@@ -1,0 +1,49 @@
+
+CREATE TABLE IF NOT EXISTS public.marks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    examinee_id UUID NOT NULL REFERENCES public.examinees(id) ON DELETE CASCADE,
+    exam_id UUID NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+    kitab_id UUID NOT NULL REFERENCES public.kitabs(id) ON DELETE RESTRICT,
+    distribution_id UUID REFERENCES public.answer_script_distributions(id) ON DELETE SET NULL, -- Link to the distribution batch
+    examiner_id UUID REFERENCES public.teachers(id) ON DELETE SET NULL, -- The examiner who graded the script
+    obtained_marks INTEGER CHECK (obtained_marks >= 0), -- Made nullable
+    status TEXT NOT NULL DEFAULT 'present' CHECK (status IN ('present', 'absent', 'expelled')), -- New column for status
+    entered_by UUID REFERENCES auth.users(id), -- The admin user who entered the mark
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+
+    -- An examinee can only have one mark per kitab in a given exam.
+    CONSTRAINT unique_examinee_exam_kitab_mark UNIQUE (examinee_id, exam_id, kitab_id),
+    -- New constraint to ensure data integrity based on status
+    CONSTRAINT check_marks_based_on_status CHECK (
+        (status = 'present' AND obtained_marks IS NOT NULL) OR
+        (status IN ('absent', 'expelled') AND obtained_marks IS NULL)
+    )
+);
+
+COMMENT ON TABLE public.marks IS 'Stores the marks obtained by an examinee for a specific kitab in an exam.';
+COMMENT ON COLUMN public.marks.examiner_id IS 'The Teacher ID of the examiner who graded this script.';
+COMMENT ON COLUMN public.marks.entered_by IS 'The auth.users ID of the admin user who entered the mark into the system.';
+COMMENT ON COLUMN public.marks.status IS 'The status of the examinee for this specific subject, e.g., present, absent, expelled.';
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_marks_examinee_id ON public.marks(examinee_id);
+CREATE INDEX IF NOT EXISTS idx_marks_exam_id ON public.marks(exam_id);
+CREATE INDEX IF NOT EXISTS idx_marks_kitab_id ON public.marks(kitab_id);
+CREATE INDEX IF NOT EXISTS idx_marks_examiner_id ON public.marks(examiner_id);
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS on_marks_updated ON public.marks;
+CREATE TRIGGER on_marks_updated
+BEFORE UPDATE ON public.marks
+FOR EACH ROW
+EXECUTE FUNCTION public.handle_updated_at();
+
+-- RLS Policies
+ALTER TABLE public.marks ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow admin full access to marks"
+ON public.marks
+FOR ALL TO authenticated
+USING ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'))
+WITH CHECK ((SELECT role FROM public.user_profiles WHERE id = auth.uid()) IN ('admin', 'super_admin'));

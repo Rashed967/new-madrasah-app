@@ -1,0 +1,23 @@
+CREATE OR REPLACE FUNCTION public.delete_contact_submission(
+    p_id UUID
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = auth.uid();
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'বার্তা মুছে ফেলার অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+    
+    DELETE FROM public.contact_submissions WHERE id = p_id;
+    
+    IF NOT FOUND THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো বার্তা পাওয়া যায়নি।', p_id;
+    END IF;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.delete_contact_submission(UUID) TO authenticated;

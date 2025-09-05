@@ -1,0 +1,79 @@
+CREATE OR REPLACE FUNCTION public.create_marhala_with_auto_code(
+    p_name_bn TEXT,
+    p_name_ar TEXT,
+    p_type TEXT,
+    p_category TEXT,
+    p_kitab_ids UUID[],
+    p_requires_photo BOOLEAN DEFAULT FALSE -- Added parameter for requires_photo
+)
+RETURNS marhalas -- মারহালা টেবিলের টাইপ রিটার্ন করবে
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_marhala_code TEXT;
+    v_last_code_numeric INTEGER;
+    v_marhala_order INTEGER;
+    v_new_marhala marhalas%ROWTYPE;
+BEGIN
+    -- ইনপুট ভ্যালিডেশন
+    IF p_name_bn IS NULL OR p_name_bn = '' THEN
+        RAISE EXCEPTION 'মারহালার বাংলা নাম আবশ্যক (Bengali name is required)';
+    END IF;
+    IF p_type IS NULL OR NOT (p_type = 'boys' OR p_type = 'girls') THEN
+        RAISE EXCEPTION 'মারহালার ধরণ অবশ্যই ''boys'' অথবা ''girls'' হতে হবে (Type must be ''boys'' or ''girls'')';
+    END IF;
+    IF p_category IS NULL OR NOT (p_category = 'darsiyat' OR p_category = 'hifz') THEN
+        RAISE EXCEPTION 'মারহালার ক্যাটাগরি অবশ্যই ''darsiyat'' অথবা ''hifz'' হতে হবে (Category must be ''darsiyat'' or ''hifz'')';
+    END IF;
+
+    -- একই নামে এবং একই টাইপের অন্য মারহালা আছে কিনা দেখুন
+    PERFORM 1 FROM public.marhalas WHERE name_bn = p_name_bn AND type = p_type;
+    IF FOUND THEN
+        RAISE EXCEPTION '%' , format('এই বাংলা নামে (%s) টাইপের একটি মারহালা ইতিমধ্যে বিদ্যমান: "%s"', p_type, p_name_bn)
+        USING ERRCODE = '23505', DETAIL = 'Duplicate marhala name_bn for the given type', HINT = 'অন্য নাম ব্যবহার করুন (Use a different name)';
+    END IF;
+
+    -- মারহালা কোড জেনারেট করার জন্য টেবিল লক করুন
+    LOCK TABLE public.marhalas IN EXCLUSIVE MODE;
+
+    -- মারহালা কোড জেনারেট করুন
+    v_last_code_numeric := 0;
+    LOOP
+        v_last_code_numeric := v_last_code_numeric + 1;
+        v_marhala_code := 'MR' || LPAD(v_last_code_numeric::TEXT, 3, '0');
+        
+        PERFORM 1 FROM public.marhalas WHERE marhala_code = v_marhala_code;
+        IF NOT FOUND THEN
+            EXIT; -- Found an available code
+        END IF;
+    END LOOP;
+
+    -- টাইপ-ভিত্তিক পরবর্তী marhala_order নির্ধারণ
+    SELECT COALESCE(MAX(marhala_order), 0) + 1
+    INTO v_marhala_order
+    FROM public.marhalas
+    WHERE type = p_type; -- Only consider marhalas of the same type
+
+    -- নতুন মারহালা যোগ করুন
+    INSERT INTO public.marhalas (marhala_code, name_bn, name_ar, type, category, kitab_ids, marhala_order, requires_photo, created_at, updated_at)
+    VALUES (
+        v_marhala_code,
+        p_name_bn,
+        p_name_ar,
+        p_type,
+        p_category,
+        p_kitab_ids,
+        v_marhala_order,
+        COALESCE(p_requires_photo, FALSE), -- Use provided value or default to FALSE
+        NOW(),
+        NOW()
+    )
+    RETURNING * INTO v_new_marhala;
+
+    RETURN v_new_marhala;
+END;
+$$;
+
+-- ফাংশনটি চালানোর জন্য authenticated ব্যবহারকারীদের অনুমতি দিন
+GRANT EXECUTE ON FUNCTION public.create_marhala_with_auto_code(TEXT, TEXT, TEXT, TEXT, UUID[], BOOLEAN) TO authenticated;

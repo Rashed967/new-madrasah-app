@@ -1,0 +1,23 @@
+
+CREATE OR REPLACE FUNCTION public.create_book(
+    p_title TEXT,
+    p_author TEXT,
+    p_price NUMERIC,
+    p_initial_stock INTEGER
+)
+RETURNS books
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_new_book books%ROWTYPE;
+BEGIN
+    INSERT INTO public.books (title, author, price, initial_stock, current_stock)
+    VALUES (p_title, p_author, p_price, p_initial_stock, p_initial_stock)
+    RETURNING * INTO v_new_book;
+    
+    RETURN v_new_book;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_book(TEXT, TEXT, NUMERIC, INTEGER) TO authenticated;

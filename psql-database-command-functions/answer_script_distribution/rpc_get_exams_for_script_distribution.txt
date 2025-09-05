@@ -1,0 +1,11 @@
+
+CREATE OR REPLACE FUNCTION public.get_exams_for_script_distribution()
+RETURNS TABLE (id UUID, name TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER AS $$
+    SELECT e.id, e.name
+    FROM public.exams e
+    WHERE e.status = 'preparatory' AND e.is_active = TRUE
+    ORDER BY e.created_at DESC; -- Or by name, as preferred
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_exams_for_script_distribution() TO authenticated;

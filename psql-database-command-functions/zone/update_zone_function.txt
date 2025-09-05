@@ -1,0 +1,64 @@
+CREATE OR REPLACE FUNCTION public.update_zone(
+    p_id UUID,
+    p_name_bn TEXT,
+    p_districts TEXT[]
+)
+RETURNS zones -- Return the updated zone row
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_zone zones%ROWTYPE;
+    district_name TEXT;
+    existing_zone_name TEXT;
+BEGIN
+    -- Input Validation
+    IF p_id IS NULL THEN
+        RAISE EXCEPTION 'জোন আইডি আবশ্যক।';
+    END IF;
+    IF p_name_bn IS NULL OR p_name_bn = '' THEN
+        RAISE EXCEPTION 'জোনের বাংলা নাম আবশ্যক।';
+    END IF;
+    IF p_districts IS NULL OR array_length(p_districts, 1) IS NULL OR array_length(p_districts, 1) = 0 THEN
+        RAISE EXCEPTION 'অন্তত একটি জেলা আবশ্যক।';
+    END IF;
+
+    -- Check for duplicate Bengali name (excluding the current zone being updated)
+    PERFORM 1 FROM public.zones WHERE name_bn = p_name_bn AND id <> p_id;
+    IF FOUND THEN
+        RAISE EXCEPTION 'এই বাংলা নামে আরেকটি জোন ইতিমধ্যে বিদ্যমান: "%"', p_name_bn
+        USING ERRCODE = '23505'; -- unique_violation
+    END IF;
+
+    -- Check if any of the provided districts are already part of another zone
+    FOREACH district_name IN ARRAY p_districts
+    LOOP
+        SELECT z.name_bn INTO existing_zone_name
+        FROM public.zones z
+        WHERE district_name = ANY(z.districts) AND z.id <> p_id;
+
+        IF existing_zone_name IS NOT NULL THEN
+            RAISE EXCEPTION 'জেলা "%" ইতিমধ্যে "%" জোনে অন্তর্ভুক্ত।', district_name, existing_zone_name
+            USING ERRCODE = 'P0002', -- Custom error code for business logic violation
+                  HINT = 'জেলাটিকে অন্য জোন থেকে সরিয়ে আবার চেষ্টা করুন অথবা ভিন্ন জেলা নির্বাচন করুন।';
+        END IF;
+    END LOOP;
+
+    -- Update the zone
+    UPDATE public.zones
+    SET 
+        name_bn = p_name_bn,
+        districts = p_districts,
+        updated_at = NOW()
+    WHERE id = p_id
+    RETURNING * INTO v_updated_zone;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'প্রদত্ত আইডি (%) সহ কোনো জোন পাওয়া যায়নি।', p_id;
+    END IF;
+
+    RETURN v_updated_zone;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_zone(UUID, TEXT, TEXT[]) TO authenticated;

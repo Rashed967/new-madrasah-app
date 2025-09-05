@@ -1,0 +1,16 @@
+
+CREATE TABLE IF NOT EXISTS public.examinee_exam_fee_details (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    exam_fee_collection_id UUID NOT NULL REFERENCES public.exam_fee_collections(id) ON DELETE CASCADE,
+    examinee_id UUID NOT NULL REFERENCES public.examinees(id) ON DELETE RESTRICT,
+    paid_fee_for_examinee NUMERIC(10, 2) NOT NULL CHECK (paid_fee_for_examinee >= 0),
+    student_type_at_collection TEXT NOT NULL CHECK (student_type_at_collection IN ('regular', 'irregular')),
+    marhala_id_at_collection UUID NOT NULL REFERENCES public.marhalas(id) ON DELETE RESTRICT, -- For historical reference
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+
+    CONSTRAINT unique_collection_examinee_fee UNIQUE (exam_fee_collection_id, examinee_id)
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_eefd_collection_id ON public.examinee_exam_fee_details(exam_fee_collection_id);
+CREATE INDEX IF NOT EXISTS idx_eefd_examinee_id ON public.examinee_exam_fee_details(examinee_id);

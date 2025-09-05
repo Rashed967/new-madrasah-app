@@ -1,0 +1,9 @@
+-- Function to get active FAQs (for public homepage)
+CREATE OR REPLACE FUNCTION get_active_faqs()
+RETURNS TABLE (id BIGINT, question TEXT, answer TEXT, order_index INT, created_at TIMESTAMPTZ)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY SELECT faqs.id, faqs.question, faqs.answer, faqs.order_index, faqs.created_at FROM faqs WHERE is_active = TRUE ORDER BY order_index ASC, created_at DESC;
+END;
+$$; 

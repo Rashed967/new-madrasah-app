@@ -1,0 +1,9 @@
+-- Function to get all notices (for admin)
+CREATE OR REPLACE FUNCTION get_all_notices()
+RETURNS TABLE (id BIGINT, title TEXT, content TEXT, is_active BOOLEAN, created_at TIMESTAMPTZ)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY SELECT * FROM notices ORDER BY created_at DESC;
+END;
+$$;

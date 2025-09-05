@@ -1,0 +1,158 @@
+
+CREATE OR REPLACE FUNCTION public.update_teacher( 
+    p_teacher_id UUID, 
+    p_updates JSONB 
+)
+RETURNS teachers 
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_updated_teacher teachers%ROWTYPE; 
+    v_current_teacher_record teachers%ROWTYPE; 
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+    
+    _name_bn TEXT; _name_en TEXT; _mobile TEXT; _nid_number TEXT; _email TEXT;
+    _date_of_birth DATE; _gender TEXT; _photo_url TEXT; _payment_info JSONB;
+    _address_details JSONB; 
+    _educational_qualification_marhala_id UUID; 
+    _kitabi_qualification_kitab_ids UUID[];
+    _expertise_areas TEXT[]; _notes TEXT; _is_active BOOLEAN;
+
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    -- Check if the calling user is an admin OR if the calling user is the teacher being updated (for self-update)
+    IF NOT (
+        (v_user_role = 'admin' OR v_user_role = 'super_admin') OR
+        (EXISTS (SELECT 1 FROM public.teacher_user_mapping tum WHERE tum.user_id = v_current_user_id AND tum.teacher_id = p_teacher_id))
+    ) THEN
+        RAISE EXCEPTION 'শিক্ষকের তথ্য আপডেট করার অনুমতি আপনার নেই।' USING ERRCODE = '42501'; 
+    END IF;
+
+    IF p_teacher_id IS NULL THEN
+        RAISE EXCEPTION 'শিক্ষক আইডি আবশ্যক।'; 
+    END IF;
+
+    SELECT * INTO v_current_teacher_record FROM public.teachers WHERE id = p_teacher_id; 
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'শিক্ষক আইডি (%) খুঁজে পাওয়া যায়নি।', p_teacher_id; 
+    END IF;
+
+    -- Extract fields from p_updates, falling back to current record's values if not provided
+    _name_bn                    := COALESCE(p_updates->>'name_bn', v_current_teacher_record.name_bn);
+    _name_en                    := COALESCE(p_updates->>'name_en', v_current_teacher_record.name_en);
+    _mobile                     := COALESCE(p_updates->>'mobile', v_current_teacher_record.mobile);
+    _nid_number                 := COALESCE(p_updates->>'nid_number', v_current_teacher_record.nid_number);
+    _email                      := COALESCE(p_updates->>'email', v_current_teacher_record.email);
+    _date_of_birth              := COALESCE((p_updates->>'date_of_birth')::DATE, v_current_teacher_record.date_of_birth);
+    _gender                     := COALESCE(p_updates->>'gender', v_current_teacher_record.gender);
+    _photo_url                  := CASE WHEN p_updates ? 'photo_url' THEN p_updates->>'photo_url' ELSE v_current_teacher_record.photo_url END;
+    _payment_info               := COALESCE(p_updates->'payment_info', v_current_teacher_record.payment_info);
+    _address_details            := COALESCE(p_updates->'address_details', v_current_teacher_record.address_details);
+    
+    IF p_updates ? 'educational_qualification' THEN
+        IF p_updates->>'educational_qualification' IS NULL THEN RAISE EXCEPTION 'শিক্ষাগত যোগ্যতা (মারহালা) খালি হতে পারবে না।'; END IF;
+        _educational_qualification_marhala_id := (p_updates->>'educational_qualification')::UUID;
+    ELSE
+        _educational_qualification_marhala_id := v_current_teacher_record.educational_qualification;
+    END IF;
+
+    IF p_updates ? 'kitabi_qualification' THEN
+         IF p_updates->'kitabi_qualification' IS NULL OR jsonb_array_length(p_updates->'kitabi_qualification') = 0 THEN RAISE EXCEPTION 'অন্তত একটি কিতাবী যোগ্যতা নির্বাচন করুন।'; END IF;
+        SELECT array_agg(el::uuid) INTO _kitabi_qualification_kitab_ids FROM jsonb_array_elements_text(p_updates->'kitabi_qualification') el;
+    ELSE
+        _kitabi_qualification_kitab_ids := v_current_teacher_record.kitabi_qualification;
+    END IF;
+
+    _expertise_areas            := COALESCE(ARRAY(SELECT jsonb_array_elements_text(p_updates->'expertise_areas')), v_current_teacher_record.expertise_areas);
+    _notes                      := COALESCE(p_updates->>'notes', v_current_teacher_record.notes);
+    _is_active                  := COALESCE((p_updates->>'is_active')::BOOLEAN, v_current_teacher_record.is_active);
+
+    -- Validations for new values (only if they are being changed by an admin)
+    -- Teachers updating their own profile via update_my_teacher_profile will have limited fields allowed
+    -- This general update_teacher function (callable by admin) needs to validate all possible updatable fields.
+    IF _name_bn IS NULL OR TRIM(_name_bn) = '' THEN RAISE EXCEPTION 'বাংলা নাম আবশ্যক।'; END IF;
+    
+    -- If called by an admin, they can change mobile/NID/email, so validate them if changed.
+    -- If called by a teacher (via update_my_teacher_profile), these fields might not be in p_updates.
+    IF p_updates ? 'mobile' THEN
+        IF _mobile IS NULL OR TRIM(_mobile) = '' THEN RAISE EXCEPTION 'মোবাইল নম্বর আবশ্যক।'; END IF;
+        IF NOT (_mobile ~ '^(01[3-9]\d{8})$') THEN RAISE EXCEPTION 'সঠিক বাংলাদেশী মোবাইল নম্বর দিন (১১ সংখ্যা)।'; END IF;
+        IF _mobile IS DISTINCT FROM v_current_teacher_record.mobile THEN
+            PERFORM 1 FROM public.teachers WHERE mobile = _mobile AND id <> p_teacher_id; 
+            IF FOUND THEN RAISE EXCEPTION 'এই মোবাইল নম্বর (%s) দিয়ে অন্য শিক্ষক নিবন্ধিত।', _mobile USING ERRCODE = '23505'; END IF; 
+        END IF;
+    END IF;
+
+    IF p_updates ? 'nid_number' THEN
+        IF _nid_number IS NULL OR TRIM(_nid_number) = '' THEN RAISE EXCEPTION 'NID নম্বর আবশ্যক।'; END IF;
+        IF NOT (_nid_number ~ '^\d{10}$|^\d{13}$|^\d{17}$') THEN RAISE EXCEPTION 'সঠিক NID নম্বর দিন (১০, ১৩ বা ১৭ সংখ্যার)।'; END IF;
+        IF _nid_number IS DISTINCT FROM v_current_teacher_record.nid_number THEN
+            PERFORM 1 FROM public.teachers WHERE nid_number = _nid_number AND id <> p_teacher_id; 
+            IF FOUND THEN RAISE EXCEPTION 'এই NID নম্বর (%s) দিয়ে অন্য শিক্ষক নিবন্ধিত।', _nid_number USING ERRCODE = '23505'; END IF; 
+        END IF;
+    END IF;
+    
+    IF p_updates ? 'email' THEN
+        IF _email IS NOT NULL AND TRIM(_email) <> '' AND _email IS DISTINCT FROM v_current_teacher_record.email THEN
+            PERFORM 1 FROM public.teachers WHERE email = _email AND id <> p_teacher_id; 
+            IF FOUND THEN RAISE EXCEPTION 'এই ইমেইল (%s) দিয়ে অন্য শিক্ষক নিবন্ধিত।', _email USING ERRCODE = '23505'; END IF; 
+        END IF;
+    END IF;
+    
+    -- Common validations applicable to self-update or admin update
+    IF _date_of_birth IS NULL THEN RAISE EXCEPTION 'জন্ম তারিখ আবশ্যক।'; END IF;
+    IF _gender IS NULL OR NOT (_gender IN ('male', 'female', 'other')) THEN RAISE EXCEPTION 'লিঙ্গ আবশ্যক (male/female/other)।'; END IF;
+    IF _educational_qualification_marhala_id IS NULL THEN RAISE EXCEPTION 'শিক্ষাগত যোগ্যতা (মারহালা) আবশ্যক।'; END IF;
+    IF _kitabi_qualification_kitab_ids IS NULL OR array_length(_kitabi_qualification_kitab_ids, 1) IS NULL OR array_length(_kitabi_qualification_kitab_ids, 1) = 0 THEN
+        RAISE EXCEPTION 'অন্তত একটি কিতাবী যোগ্যতা নির্বাচন করুন।';
+    END IF;
+    IF _payment_info IS NULL THEN RAISE EXCEPTION 'পেমেন্ট তথ্য আবশ্যক।'; END IF;
+    IF NOT(_payment_info ? 'type' AND ((_payment_info->>'type' = 'mobile' AND _payment_info ? 'provider' AND _payment_info ? 'account_number') OR 
+                                     (_payment_info->>'type' = 'bank' AND _payment_info ? 'account_name' AND _payment_info ? 'account_number' AND _payment_info ? 'bank_name' AND _payment_info ? 'branch_name'))) THEN
+        RAISE EXCEPTION 'পেমেন্ট তথ্যের ফরম্যাট সঠিক নয়।';
+    END IF;
+    
+    IF _educational_qualification_marhala_id IS DISTINCT FROM v_current_teacher_record.educational_qualification THEN
+        PERFORM 1 FROM public.marhalas WHERE id = _educational_qualification_marhala_id;
+        IF NOT FOUND THEN RAISE EXCEPTION 'নির্বাচিত শিক্ষাগত যোগ্যতা (মারহালা আইডি: %) সঠিক নয়।', _educational_qualification_marhala_id USING ERRCODE = '23503'; END IF;
+    END IF;
+    
+    IF _kitabi_qualification_kitab_ids IS DISTINCT FROM v_current_teacher_record.kitabi_qualification THEN
+        DECLARE kitab_id_val UUID;
+        BEGIN
+            FOREACH kitab_id_val IN ARRAY _kitabi_qualification_kitab_ids LOOP
+                PERFORM 1 FROM public.kitabs WHERE id = kitab_id_val;
+                IF NOT FOUND THEN RAISE EXCEPTION 'নির্বাচিত কিতাবী যোগ্যতার মধ্যে একটি কিতাব আইডি (%s) সঠিক নয়।', kitab_id_val USING ERRCODE = '23503'; END IF;
+            END LOOP;
+        END;
+    END IF;
+
+    UPDATE public.teachers 
+    SET
+        name_bn = _name_bn,
+        name_en = _name_en,
+        mobile = _mobile,
+        nid_number = _nid_number,
+        email = _email,
+        date_of_birth = _date_of_birth,
+        gender = _gender,
+        photo_url = _photo_url,
+        payment_info = _payment_info,
+        address_details = _address_details,
+        educational_qualification = _educational_qualification_marhala_id,
+        kitabi_qualification = _kitabi_qualification_kitab_ids,
+        expertise_areas = _expertise_areas,
+        notes = _notes,
+        is_active = _is_active, -- Only admins should be able to change this
+        updated_at = NOW()
+    WHERE id = p_teacher_id 
+    RETURNING * INTO v_updated_teacher; 
+
+    RETURN v_updated_teacher; 
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_teacher(UUID, JSONB) TO authenticated;
+      

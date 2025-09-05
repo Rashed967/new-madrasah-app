@@ -1,0 +1,85 @@
+
+-- approve_madrasa_application_function.txt
+-- Dropping the old function to avoid signature conflicts.
+DROP FUNCTION IF EXISTS public.approve_madrasa_application(uuid);
+
+-- REFACTORED to be called from a secure environment (like an Edge Function) AFTER user creation.
+CREATE OR REPLACE FUNCTION public.approve_madrasa_application(
+  p_application_id uuid,
+  p_new_user_id uuid,
+  p_user_email text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+-- This function MUST run with elevated privileges to insert into user_profiles
+-- because it's not the user themselves creating their profile.
+-- It's an admin action on behalf of a new user.
+SECURITY DEFINER
+AS $$
+declare
+  v_application record;
+  v_new_madrasa_id uuid;
+  v_new_madrasa_code integer;
+  v_madrasa_role TEXT := 'madrasa'; -- or whatever role you assign
+begin
+  -- 1. Check admin role of the CALLER (the Edge Function runs as service_role, but this is a good practice check if called by other admins)
+  if not (select role from public.user_profiles where id = auth.uid()) in ('admin', 'super_admin') then
+    raise exception 'অনুমোদনের অনুমতি নেই।';
+  end if;
+
+  -- 2. Fetch application data and lock the row
+  select * into v_application from public.madrasa_applications where id = p_application_id for update;
+
+  if not found then
+    raise exception 'আবেদন খুঁজে পাওয়া যায়নি।';
+  end if;
+
+  if v_application.application_status <> 'pending' then
+    raise exception 'এই আবেদনটি ইতিমধ্যে পর্যালোচিত হয়েছে।';
+  end if;
+  
+  -- 3. The user has already been created via Edge Function. We received p_new_user_id.
+  -- Now, perform the database actions.
+
+  -- 4. Generate madrasa_code
+  select coalesce(max(madrasa_code), 10000) + 1 into v_new_madrasa_code from public.madrasas;
+
+  -- 5. Insert into madrasas table
+  insert into public.madrasas (
+    madrasa_code, name_bn, name_ar, name_en, address, zone_id, mobile1, mobile2, type,
+    highest_marhala_boys_id, highest_marhala_girls_id,
+    muhtamim, education_secretary, mutawalli, registration_date, ilhak_form_url, user_id
+  ) values (
+    v_new_madrasa_code, v_application.name_bn, v_application.name_ar, v_application.name_en, v_application.address, v_application.zone_id, v_application.mobile1, v_application.mobile2, v_application.type,
+    v_application.highest_marhala_boys_id, v_application.highest_marhala_girls_id,
+    v_application.muhtamim, v_application.education_secretary, v_application.mutawalli, v_application.registration_date, v_application.ilhak_form_url, p_new_user_id
+  ) returning id into v_new_madrasa_id;
+  
+  -- 6. Update user_profile with role and madrasa_id for the new user
+  insert into public.user_profiles (id, role, madrasa_id, full_name, email)
+  values (p_new_user_id, v_madrasa_role, v_new_madrasa_id, v_application.muhtamim->>'name', p_user_email)
+  on conflict (id) do update set
+    role = v_madrasa_role,
+    madrasa_id = v_new_madrasa_id,
+    full_name = v_application.muhtamim->>'name',
+    email = p_user_email,
+    updated_at = now();
+
+  -- 7. Update application status
+  update public.madrasa_applications
+  set application_status = 'approved',
+      reviewed_by = auth.uid()
+  where id = p_application_id;
+
+  return jsonb_build_object(
+      'new_madrasa_id', v_new_madrasa_id,
+      'new_user_id', p_new_user_id
+  );
+exception
+    when others then
+        raise warning 'Error approving madrasa application %: %', p_application_id, SQLERRM;
+        raise;
+end;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.approve_madrasa_application(uuid, uuid, text) TO authenticated;

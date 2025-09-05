@@ -1,0 +1,12 @@
+
+CREATE OR REPLACE FUNCTION public.get_all_officials()
+RETURNS SETOF officials
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT *
+    FROM public.officials
+    ORDER BY order_index ASC, created_at ASC;
+$$;
+GRANT EXECUTE ON FUNCTION public.get_all_officials() TO authenticated;

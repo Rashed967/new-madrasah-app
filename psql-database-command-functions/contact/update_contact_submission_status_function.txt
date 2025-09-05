@@ -1,0 +1,30 @@
+CREATE OR REPLACE FUNCTION public.update_contact_submission_status(
+    p_id UUID,
+    p_new_status TEXT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_role TEXT;
+BEGIN
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = auth.uid();
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RAISE EXCEPTION 'স্ট্যাটাস পরিবর্তনের অনুমতি আপনার নেই।' USING ERRCODE = '42501';
+    END IF;
+
+    IF NOT (p_new_status IN ('new', 'read', 'replied', 'archived')) THEN
+        RAISE EXCEPTION 'অবৈধ স্ট্যাটাস।';
+    END IF;
+    
+    UPDATE public.contact_submissions
+    SET status = p_new_status
+    WHERE id = p_id;
+
+    IF NOT FOUND THEN
+        RAISE WARNING 'প্রদত্ত আইডি (%) সহ কোনো বার্তা পাওয়া যায়নি।', p_id;
+    END IF;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.update_contact_submission_status(UUID, TEXT) TO authenticated;

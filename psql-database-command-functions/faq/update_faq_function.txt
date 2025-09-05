@@ -1,0 +1,36 @@
+-- Step 1: Drop potentially conflicting function signatures for update_faq to prevent overload issues.
+-- The specific signatures are taken from the PostgREST error message.
+-- This ensures a clean slate before creating the consolidated function.
+DROP FUNCTION IF EXISTS public.update_faq(bigint, text, text, boolean, integer);
+DROP FUNCTION IF EXISTS public.update_faq(bigint, text, text, integer, boolean);
+DROP FUNCTION IF EXISTS public.update_faq(bigint, text, text, boolean);
+DROP FUNCTION IF EXISTS public.update_faq(bigint, text, text);
+DROP FUNCTION IF EXISTS public.update_faq(bigint, boolean);
+DROP FUNCTION IF EXISTS public.update_faq(bigint, integer);
+
+
+-- Step 2: Create the single, definitive function for updating FAQs.
+-- This approach uses COALESCE to update only the fields that are provided,
+-- keeping existing values for any parameters passed as NULL.
+CREATE OR REPLACE FUNCTION public.update_faq(
+  p_faq_id BIGINT,
+  p_question TEXT DEFAULT NULL,
+  p_answer TEXT DEFAULT NULL,
+  p_is_active BOOLEAN DEFAULT NULL,
+  p_order_index INTEGER DEFAULT NULL
+)
+RETURNS SETOF faqs -- Returns the updated row
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  UPDATE faqs
+  SET
+    question = COALESCE(p_question, question),
+    answer = COALESCE(p_answer, answer),
+    is_active = COALESCE(p_is_active, is_active),
+    order_index = COALESCE(p_order_index, order_index)
+  WHERE id = p_faq_id
+  RETURNING *;
+END;
+$$;

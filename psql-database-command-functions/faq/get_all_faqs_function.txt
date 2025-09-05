@@ -1,0 +1,9 @@
+-- Function to get all FAQs (for admin)
+CREATE OR REPLACE FUNCTION get_all_faqs()
+RETURNS TABLE (id BIGINT, question TEXT, answer TEXT, order_index INT, is_active BOOLEAN, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY SELECT * FROM faqs ORDER BY order_index ASC, created_at DESC;
+END;
+$$; 

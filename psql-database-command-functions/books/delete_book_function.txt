@@ -1,0 +1,17 @@
+
+CREATE OR REPLACE FUNCTION public.delete_book(p_book_id UUID)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    -- Check if there are any sales records for this book
+    IF EXISTS (SELECT 1 FROM public.book_sales WHERE book_id = p_book_id) THEN
+        RAISE EXCEPTION 'এই বইটির বিক্রয় রেকর্ড থাকায় এটি মুছে ফেলা সম্ভব নয়।';
+    END IF;
+
+    DELETE FROM public.books WHERE id = p_book_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.delete_book(UUID) TO authenticated;

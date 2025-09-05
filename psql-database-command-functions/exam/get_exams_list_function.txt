@@ -1,0 +1,109 @@
+
+CREATE OR REPLACE FUNCTION public.get_exams_list(
+    p_page INTEGER DEFAULT 1,
+    p_limit INTEGER DEFAULT 10,
+    p_search_term TEXT DEFAULT NULL,
+    p_is_active BOOLEAN DEFAULT NULL,
+    p_status TEXT DEFAULT NULL, -- New parameter for lifecycle status filter
+    p_sort_field TEXT DEFAULT 'created_at',
+    p_sort_order TEXT DEFAULT 'desc'
+)
+RETURNS JSONB -- Returns { items: Exam[], totalItems: number }
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    _query TEXT;
+    _count_query TEXT;
+    _offset INTEGER;
+    _total_items INTEGER;
+    _items_jsonb JSONB;
+    _exam_fees_jsonb JSONB;
+    r RECORD;
+    result_items JSONB[];
+BEGIN
+    _offset := (p_page - 1) * p_limit;
+
+    -- Base query
+    _query := 'SELECT * FROM public.exams WHERE TRUE';
+    _count_query := 'SELECT COUNT(*) FROM public.exams WHERE TRUE';
+
+    -- Search term filter
+    IF p_search_term IS NOT NULL AND p_search_term <> '' THEN
+        _query := _query || format(' AND name ILIKE %1$L', '%' || p_search_term || '%');
+        _count_query := _count_query || format(' AND name ILIKE %1$L', '%' || p_search_term || '%');
+    END IF;
+    
+    -- is_active filter
+    IF p_is_active IS NOT NULL THEN
+        _query := _query || format(' AND is_active = %L', p_is_active);
+        _count_query := _count_query || format(' AND is_active = %L', p_is_active);
+    END IF;
+
+    -- status (lifecycle) filter
+    IF p_status IS NOT NULL AND p_status <> '' THEN
+        IF NOT (p_status IN ('pending', 'preparatory', 'ongoing', 'completed', 'cancelled')) THEN
+            RAISE EXCEPTION 'অবৈধ পরীক্ষার স্ট্যাটাস ফিল্টার: %', p_status;
+        END IF;
+        _query := _query || format(' AND status = %L', p_status);
+        _count_query := _count_query || format(' AND status = %L', p_status);
+    END IF;
+
+    -- Get total count
+    EXECUTE _count_query INTO _total_items;
+
+    -- Add sorting
+    IF p_sort_field IS NOT NULL AND (lower(p_sort_order) = 'asc' OR lower(p_sort_order) = 'desc') THEN
+        IF p_sort_field IN ('name', 'created_at', 'registration_deadline', 'status') THEN -- Whitelist sortable fields
+            _query := _query || format(' ORDER BY %I %s', p_sort_field, p_sort_order);
+        ELSE
+            _query := _query || ' ORDER BY created_at DESC'; -- Default sort
+        END IF;
+    ELSE
+        _query := _query || ' ORDER BY created_at DESC'; -- Default sort
+    END IF;
+
+    -- Add pagination
+    _query := _query || format(' LIMIT %L OFFSET %L', p_limit, _offset);
+
+    -- Fetch exams and their fees
+    result_items := ARRAY[]::JSONB[];
+    FOR r IN EXECUTE _query
+    LOOP
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'marhalaId', emf.marhala_id,
+            'startingRollNumber', emf.starting_roll_number,
+            'regularFee', emf.regular_fee,
+            'irregularFee', emf.irregular_fee,
+            'lateRegularFee', emf.late_regular_fee,
+            'lateIrregularFee', emf.late_irregular_fee
+           -- Add other fields from exam_marhala_fees as needed
+        )), '[]'::jsonb)
+        INTO _exam_fees_jsonb
+        FROM public.exam_marhala_fees emf
+        WHERE emf.exam_id = r.id;
+
+        result_items := array_append(result_items, jsonb_build_object(
+            'id', r.id,
+            'name', r.name,
+            'registrationDeadline', r.registration_deadline,
+            'startingRegistrationNumber', r.starting_registration_number,
+            'registrationFeeRegular', r.registration_fee_regular,
+            'registrationFeeIrregular', r.registration_fee_irregular,
+            'lateRegistrationFeeRegular', r.late_registration_fee_regular,
+            'lateRegistrationFeeIrregular', r.late_registration_fee_irregular,
+            'isActive', r.is_active,
+            'status', r.status, -- Include status
+            'createdAt', r.created_at,
+            'updatedAt', r.updated_at,
+            'examFees', _exam_fees_jsonb 
+        ));
+    END LOOP;
+
+    _items_jsonb := COALESCE(array_to_json(result_items)::jsonb, '[]'::jsonb);
+    
+    RETURN jsonb_build_object('items', _items_jsonb, 'totalItems', _total_items);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_exams_list(INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT, TEXT) TO authenticated;

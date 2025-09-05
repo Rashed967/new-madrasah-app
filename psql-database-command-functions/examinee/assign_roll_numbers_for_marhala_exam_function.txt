@@ -1,0 +1,77 @@
+
+CREATE OR REPLACE FUNCTION public.assign_roll_numbers_for_marhala_exam(
+    p_exam_id UUID,
+    p_marhala_id UUID
+)
+RETURNS JSONB -- Returns { success: boolean, message: text, assigned_count: integer }
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_exam_marhala_fee_record public.exam_marhala_fees%ROWTYPE;
+    v_max_assigned_roll INTEGER;
+    v_next_roll_number INTEGER;
+    v_examinee_record public.examinees%ROWTYPE;
+    v_assigned_count INTEGER := 0;
+    v_user_role TEXT;
+    v_current_user_id UUID := auth.uid();
+BEGIN
+    -- Role Check
+    SELECT role INTO v_user_role FROM public.user_profiles WHERE id = v_current_user_id;
+    IF NOT (v_user_role = 'admin' OR v_user_role = 'super_admin') THEN
+        RETURN jsonb_build_object('success', false, 'message', 'রোল নম্বর এসাইন করার অনুমতি আপনার নেই।', 'assigned_count', 0);
+    END IF;
+
+    -- Get starting roll number for the marhala in this exam
+    SELECT * INTO v_exam_marhala_fee_record
+    FROM public.exam_marhala_fees
+    WHERE exam_id = p_exam_id AND marhala_id = p_marhala_id;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('success', false, 'message', 'এই পরীক্ষা ও মারহালার জন্য শুরুর রোল নম্বর তথ্য পাওয়া যায়নি।', 'assigned_count', 0);
+    END IF;
+
+    -- Determine the next roll number to assign
+    SELECT MAX(roll_number) INTO v_max_assigned_roll
+    FROM public.examinees
+    WHERE exam_id = p_exam_id AND marhala_id = p_marhala_id AND roll_number IS NOT NULL;
+
+    IF v_max_assigned_roll IS NULL THEN
+        v_next_roll_number := v_exam_marhala_fee_record.starting_roll_number;
+    ELSE
+        v_next_roll_number := v_max_assigned_roll + 1;
+    END IF;
+
+    -- Fetch eligible examinees (status 'finalized_fee_paid') and assign rolls
+    FOR v_examinee_record IN
+        SELECT * FROM public.examinees
+        WHERE exam_id = p_exam_id
+          AND marhala_id = p_marhala_id
+          AND status = 'fee_paid'
+        ORDER BY registration_number ASC -- Or other deterministic order
+    LOOP
+        UPDATE public.examinees
+        SET 
+            roll_number = v_next_roll_number,
+            status = 'roll_assigned',
+            updated_at = NOW()
+        WHERE id = v_examinee_record.id;
+
+        v_next_roll_number := v_next_roll_number + 1;
+        v_assigned_count := v_assigned_count + 1;
+    END LOOP;
+
+    IF v_assigned_count = 0 THEN
+        RETURN jsonb_build_object('success', true, 'message', 'রোল নম্বর এসাইন করার জন্য কোনো যোগ্য পরীক্ষার্থী পাওয়া যায়নি (সম্ভবত সকলের রোল আগেই নির্ধারিত হয়েছে)।', 'assigned_count', 0);
+    END IF;
+
+    RETURN jsonb_build_object('success', true, 'message', 'রোল নম্বর সফলভাবে এসাইন করা হয়েছে।', 'assigned_count', v_assigned_count);
+
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE WARNING 'Error in assign_roll_numbers_for_marhala_exam: SQLSTATE: %, SQLERRM: %', SQLSTATE, SQLERRM;
+        RETURN jsonb_build_object('success', false, 'message', 'একটি অপ্রত্যাশিত ত্রুটি ঘটেছে: ' || SQLERRM, 'assigned_count', 0);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.assign_roll_numbers_for_marhala_exam(UUID, UUID) TO authenticated;
