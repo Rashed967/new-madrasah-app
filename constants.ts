@@ -23,7 +23,7 @@ export const PUBLIC_NAV_ITEMS: NavItemType[] = [
   // { path: '/apply-affiliation', label: 'মাদরাসা অন্তর্ভুক্তি', icon: PlusCircleIcon },
   { path: '/apply-certificate', label: 'সনদের আবেদন', icon: DocumentDuplicateIcon },
   { path: '/certificate-status', label: 'সনদের স্ট্যাটাস', icon: MagnifyingGlassIcon },
-  { path: '/login', label: 'এডমিন লগইন', icon: Cog6ToothIcon },
+  
 ];
 
 export const SIDEBAR_NAV_ITEMS: NavItemType[] = [
